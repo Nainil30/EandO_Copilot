@@ -1,0 +1,17 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+data/*.csv
+*.log
+.chroma/
+
+.vscode/
+.idea/
+
+.chroma/
+.cache/
+

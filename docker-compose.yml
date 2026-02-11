@@ -1,0 +1,22 @@
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: eando_postgres
+    environment:
+      POSTGRES_DB: eando_copilot
+      POSTGRES_USER: copilot_user
+      POSTGRES_PASSWORD: dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U copilot_user -d eando_copilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
