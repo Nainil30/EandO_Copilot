@@ -1,38 +1,59 @@
-# E&O Copilot (Text → SQL + RAG + Guardrails)
+# E&O Copilot — Text → SQL with RAG, Guardrails, Reranking, Evals, and a Minimal UI
 
-E&O Copilot is a **company-grade analytics assistant** that converts **natural language questions** into **safe PostgreSQL SELECT queries**, executes them against a Postgres database, and returns results with **citations + retrieval transparency**.
+E&O Copilot is a company-style analytics assistant that converts natural language questions into **safe PostgreSQL `SELECT` queries**, executes them on a Postgres database, and returns results with **citations + retrieval transparency**.
 
-This is not a toy “basic RAG” demo. It includes the core patterns real teams need:
-- **Hybrid retrieval (vector + BM25)** over schema + business glossary + SQL examples
-- **LLM reranking** to reduce context to only the most relevant chunks
-- **SQL guardrails** (validation + allowlist-style behavior through context)
-- **Execution visibility** (retrieval preview + citations)
+This is not a basic “toy RAG” demo. It uses patterns you actually see in production:
+- **Hybrid retrieval (Vector + BM25)** across schema + business glossary + SQL examples
+- **LLM reranking** to reduce context to only the most useful chunks
+- **SQL guardrails** (strict validation + safe execution)
+- **Retrieval transparency** (citations + retrieval preview)
 - **Audit logging** (governance / traceability)
 - **Evaluation harness** (repeatable quality measurement)
-- Minimal, functional **Streamlit UI** for analysts/managers
+- **Minimal Streamlit UI** for analysts/managers
 
 ---
 
 ## What problem it solves
 
-In many companies, analysts know the data but business stakeholders don’t. Stakeholders ask questions like:
+In many teams, business stakeholders need answers but don’t write SQL. They ask questions like:
 - “Top 10 parts by excess value for EOL parts”
 - “Which suppliers contribute most to excess?”
 - “Show forecast vs inventory for platform X”
 
-Instead of making stakeholders wait for an analyst, this system:
-1. Retrieves schema + definitions + patterns (examples)
+Instead of waiting on an analyst, this system:
+1. Retrieves authoritative context (schema, joins, glossary definitions, SQL patterns)
 2. Generates one safe SQL query
 3. Validates it
-4. Executes it (optional)
-5. Returns results + “why it wrote that SQL” (citations + retrieval preview)
+4. Executes it
+5. Returns results **plus evidence of why it wrote that SQL** (citations, retrieval preview)
 
+---
 
-## Key Features
+## High-level workflow (for a non-technical manager)
 
-### 1) FastAPI backend (production-friendly API)
-**What:** Provides clean endpoints for health, schema, retrieval build/debug, NLQ-to-SQL, and raw SQL execution.  
-**Why:** Real systems are API-driven so UI / other services can consume them.
+1. Start Postgres (Docker)
+2. Start the API (FastAPI)
+3. Open the Streamlit UI
+4. Ask a question in English
+5. The system generates safe SQL, runs it, and shows results
+6. If you want to understand “why”, use the RAG Debug view to see what context was used
+
+Example question:
+> Top 10 parts by excess value (calculated_excess * unit_cost) for EOL parts
+
+Typical output:
+- SQL query it generated
+- Results table
+- Citations (which schema/glossary/examples influenced the SQL)
+- Retrieval preview (top chunks retrieved)
+
+---
+
+## Core features
+
+### 1) FastAPI backend (API-first, production friendly)
+**What it does:** Exposes clean endpoints that any UI/service can call (Swagger included).  
+**Why:** Real systems are API-driven.
 
 Endpoints:
 - `GET /health` — service check
@@ -44,407 +65,449 @@ Endpoints:
 
 ---
 
-### 2) Postgres via Docker (repeatable local setup)
-**What:** Local Postgres runs in Docker and is loaded with sample E&O tables.  
-**Why:** Zero dependency on external DB accounts. Anyone can replicate.
+### 2) Postgres via Docker (reproducible environment)
+**What it does:** Runs Postgres locally and loads sample E&O tables from CSV.  
+**Why:** No external DB accounts required; anyone can replicate.
 
 ---
 
-### 3) Hybrid Retrieval (Vector + BM25)
-**What:** Combines semantic retrieval (embeddings) + lexical retrieval (BM25).  
-**Why:** Pure vector retrieval misses exact tokens like part numbers, column names, or lifecycle states.  
-Hybrid retrieval improves accuracy in real enterprise data.
+### 3) Text-to-SQL (NLQ → SQL) with strict guardrails
+**What it does:** Converts a natural language question into **exactly one** PostgreSQL `SELECT` query.  
+**Why:** That’s the main user value.
 
-Collections used:
-- Schema chunks (tables, columns, foreign keys)
-- Business glossary chunks (definitions/metrics)
-- SQL example chunks (known-good patterns)
-
----
-
-### 4) Reranker (LLM reorders context)
-**What:** Retrieve top N chunks (e.g., 12) then rerank down to best K (e.g., 6).  
-**Why:** Big accuracy jump and lower hallucination risk.  
-This is a very common production pattern because LLMs perform best with **tight context**.
+**Guardrails used:**
+- Output must be a single `SELECT` (no multi-statement)
+- No DDL/DML (`DROP/DELETE/UPDATE/INSERT`)
+- Enforced `LIMIT` unless user explicitly requests otherwise
+- Prompt forces “use only tables/columns shown in Context”
+- Validator rejects unsafe SQL before execution
 
 ---
 
-### 5) Guardrails (SQL safety)
-**What:** Generated SQL must be:
-- single SELECT only
-- no semicolons
-- no DDL/DML (DROP/DELETE/UPDATE/INSERT)
-- only known tables/columns (enforced through “context-only” behavior + validation)
-**Why:** This is non-negotiable for company environments.
+### 4) RAG done correctly (schema + glossary + SQL examples)
+The model should not guess your schema. RAG gives it authoritative context:
+- **Schema chunks**: tables, columns, and join relationships
+- **Business glossary chunks**: definitions of metrics and terms
+- **SQL examples**: known-good patterns (joins, aggregations, filters)
+
+This reduces hallucination and improves correctness.
 
 ---
 
-### 6) Audit logging (governance)
-**What:** Each NLQ request writes a JSON line log (question → retrieval → sql → execution stats).  
-**Why:** Real teams need traceability for debugging, governance, incident review, and continuous improvement.
+### 5) Hybrid retrieval (Vector + BM25)
+**Vector search (embeddings)** retrieves semantically related text (“excess value” ↔ “overstock cost impact”).  
+**BM25** retrieves exact keyword matches (column names, lifecycle states, part numbers).
+
+**Why hybrid:** In enterprise analytics, users mix semantics and exact tokens. Hybrid retrieval handles both.
 
 ---
 
-### 7) Eval harness (quality measurement)
-**What:** Batch-run a list of NLQ questions and score:
-- pass rate (did SQL run?)
-- unsafe SQL blocked rate
+### 6) Reranking (production pattern)
+Retrieval returns top N candidate chunks (example: 12).  
+Reranker chooses the best K to actually feed into SQL generation (example: 6).
+
+**Why rerank:**
+- Higher accuracy (less irrelevant context)
+- Lower hallucination risk
+- Smaller context budget improves generation quality
+
+---
+
+### 7) Retrieval transparency
+NLQ responses include:
+- `citations`: chunk IDs used
+- `retrieval_preview`: what was retrieved and from which source
+
+**Why:** Debugging and trust. You can see *why* it produced that SQL.
+
+---
+
+### 8) Audit logging (governance)
+Each NLQ request can write a JSON line record:
+- question
+- retrieved doc ids
+- rerank selected ids
+- generated sql
+- execution rowcount
 - latency
-- common failure reasons
-**Why:** This is the difference between a hobby demo and something you can trust and improve.
+- prompt_version / kb_version
 
-## Architecture Overview
+**Why:** Traceability, incident review, and systematic improvement.
 
-High-level flow for `/nlq`:
+---
 
-1) **User question** (natural language)
-2) **Retrieve context**
-   - Vector search per collection (schema, business, examples)
-   - BM25 ranking (keyword matching) on schema collection
-   - Merge + prioritize results
-3) **Rerank context (LLM)**
-   - Use Gemini Flash to select the best chunks
-4) **Build prompt**
-   - System rules + authoritative context + question
-5) **Generate SQL (LLM)**
-6) **Validate SQL**
-   - must be safe SELECT only
-7) **Execute SQL** in Postgres
-8) Return:
-   - generated SQL
-   - results
-   - citations (doc ids)
-   - retrieval preview (what it used)
+### 9) Evaluation harness
+Run a fixed set of questions and compute:
+- pass rate (SQL executed successfully?)
+- unsafe SQL blocked rate
+- avg latency
+- common failure modes
+
+**Why:** This makes quality measurable and improvable (not vibes-based).
+
+---
+
+## Architecture (how `/nlq` works)
+
+When you call `POST /nlq`, the backend does:
+
+1. **Retrieve context (RAG)**
+   - Vector search per collection: schema, business, SQL examples
+   - BM25 ranking (keyword precision boost)
+   - Merge into a candidate list
+
+2. **Rerank**
+   - Reranker model chooses best context chunks
+
+3. **Build prompt**
+   - Hard rules + authoritative context + user question
+
+4. **Generate SQL**
+   - Gemini generates a single SQL statement
+
+5. **Validate SQL**
+   - Blocks unsafe output
+
+6. **Execute**
+   - Runs on Postgres
+
+7. **Return**
+   - SQL + results + citations + retrieval preview
 
 Key design rule:
-> The model is only allowed to use tables/columns that exist in the retrieved context.
-
-## Repository Structure
-app/
-api/
-main.py # FastAPI endpoints
-core/
-db.py # DB execution
-schema_introspect.py # schema snapshot
-sql_validate.py # SQL safety validator
-text2sql.py # retrieval + rerank + prompt builder
-audit.py # audit logging (JSONL)
-sql_repair.py # optional: deterministic repair attempt
-llm/
-gemini.py # SQL generation wrapper
-gemini_client.py # small shared Gemini client wrapper
-rag/
-kb_builder.py # builds knowledge base docs into vector store
-vector_store.py # Chroma collection helpers + embed calls
-hybrid_retriever.py # vector + bm25 retrieval, caching
-reranker.py # rerank top retrieval items using Gemini
-prompt_context.py # formats context + citations for prompt
-
-db/
-docker-compose.yml # (optional if separated)
-docker-compose.yml # Postgres container + volume
-
-data/
-*.csv # sample data (dim/fact tables)
-
-scripts/
-load_to_postgres.py # loads CSVs into Postgres
-run_evals.py # eval harness runner
-test_gemini.py # quick LLM sanity test
-
-tests/
-evals.jsonl # NLQ eval set
-
-ui/
-api_client.py # thin HTTP client used by Streamlit
-streamlit_app.py # minimal UI
-
-docs/
-BUILD_LOG.md # daily build notes
-ARCHITECTURE.md # architecture explanation
-DECISIONS.md # ADR-lite decisions
-PROMPTS.md # prompt versions
-
-## Setup (Windows 11)
-
-### 0) Prerequisites
-- Python 3.11+
-- Docker Desktop
-- Git (optional if already cloned/downloaded)
+> The model is only allowed to use tables/columns that exist in the retrieved Context.
 
 ---
 
-### 1) Clone repo
-```bash
-git clone https://github.com/<your-username>/eando-copilot.git
-cd eando-copilot
+## Repository structure
 
+```text
+app/
+  api/
+    main.py                  # FastAPI endpoints
+  core/
+    db.py                    # DB execution
+    schema_introspect.py     # schema snapshot
+    sql_validate.py          # SQL safety validator
+    text2sql.py              # retrieval + rerank + prompt builder
+    audit.py                 # audit logging (JSONL)
+    sql_repair.py            # optional: repair attempt after execution errors
+  llm/
+    gemini.py                # SQL generation wrapper
+    gemini_client.py         # shared Gemini client wrapper
+  rag/
+    kb_builder.py            # builds KB into vector store
+    vector_store.py          # Chroma helpers + embeddings
+    hybrid_retriever.py      # hybrid retrieval, caching
+    reranker.py              # rerank top retrieval items using Gemini
+    prompt_context.py        # formats context + citations for prompt
+
+data/
+  *.csv                      # sample data (dim/fact tables)
+
+db/
+  docker-compose.yml         # optional / legacy (may exist)
+
+docker-compose.yml           # Postgres container + volume (repo root)
+
+scripts/
+  load_to_postgres.py        # loads CSVs into Postgres
+  run_evals.py               # eval harness runner
+  test_gemini.py             # quick LLM sanity test
+
+tests/
+  evals.jsonl                # NLQ eval set
+
+ui/
+  api_client.py              # thin HTTP client used by Streamlit
+  streamlit_app.py           # minimal UI
+
+docs/
+  BUILD_LOG.md               # daily build notes
+  ARCHITECTURE.md            # deeper architecture explanation
+  DECISIONS.md               # ADR-lite decisions
+  PROMPTS.md                 # prompt versions
+
+```
+## Setup (Windows 11) — step-by-step
+
+### 0) Prerequisites
+Make sure you have these installed:
+
+- **Python 3.11+**
+- **Docker Desktop** (installed *and running*)
+- **Git** (optional if you downloaded the repo as a ZIP)
+
+---
+
+### 1) Clone and enter the repo
+```bash
+git clone https://github.com/Nainil30/SupplyChain_RAG.git
+cd SupplyChain_RAG
+
+## 2) Create and activate a virtual environment (venv)
+
+### PowerShell
+```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 
+
+````md
+## 2) Create and activate a virtual environment (venv)
+
+### PowerShell
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+````
+
+### Verify venv is active
+
+```powershell
 python -c "import sys; print(sys.prefix)"
- 
-### 2) Create .env (DO NOT COMMIT THIS)
+```
+
+You should see a path pointing inside your project folder (e.g., `...\SupplyChain_RAG\.venv\...`).
+
+---
+
+## 3) Create `.env` (DO NOT COMMIT)
+
+Create a file named `.env` in the **repo root**.
+
+```env
 GEMINI_API_KEY=your_key_here
 
-# Models (you can change later)
+# Models
 GEMINI_SQL_MODEL=gemini-1.5-flash
 GEMINI_RERANK_MODEL=gemini-1.5-flash
 GEMINI_EMBED_MODEL=text-embedding-004
 
-# App switches (avoid accidental token spend)
+# Switches (avoid accidental spend)
 RERANK_ENABLED=true
 EVALS_ENABLED=false
 AUDIT_ENABLED=true
 
 PROMPT_VERSION=v1
 KB_VERSION=v1
+```
 
-### 3) Create .env (DO NOT COMMIT THIS)
-docker compose up -d
-docker ps
+---
 
+## Start services (recommended sequence)
 
-4) Start Postgres using Docker
+### Step A — Start Postgres using Docker
 
 From the repo root:
 
+```powershell
 docker compose up -d
 docker ps
+```
 
+Confirm tables exist:
 
-Verify tables exist:
-
+```powershell
 docker exec -it eando_postgres psql -U copilot_user -d eando_copilot -c "\dt"
-
-5) Load CSV data into Postgres
-python scripts\load_to_postgres.py
-
-6) Build the RAG knowledge base (required once)
-
-Start API first (next step), then call /rag/build OR run through Swagger.
-
+```
 
 ---
 
-## PART 6 — Run backend + Swagger workflow
+### Step B — Load sample data into Postgres
 
-```md
-## Running the Backend (FastAPI)
+```powershell
+python scripts\load_to_postgres.py
+```
 
-### 1) Start the API
-From repo root with venv active:
+---
+
+### Step C — Start FastAPI
+
 ```powershell
 python -m uvicorn app.api.main:app --reload --port 8000
-
-2) Open Swagger Docs
-
-Open in browser:
-
-http://127.0.0.1:8000/docs
-
-3) Recommended test sequence in Swagger
-
-GET /health → should return { "status": "ok" }
-
-GET /schema → confirms DB visibility
-
-POST /rag/build → builds knowledge base (vector store)
-
-POST /rag/debug with:
-
-{ "question": "Top 10 parts by excess value for EOL parts" }
-
-
-Verify rerank selected chunk IDs make sense.
-
-POST /nlq with:
-
-{ "question": "Top 10 parts by excess value for EOL parts" }
-
-
-You should get:
-
-generated SQL
-
-results
-
-citations
-
-retrieval preview
-
-Stopping services safely
-Stop FastAPI
-
-In the terminal running uvicorn:
-
-Press CTRL + C
-
-Stop Docker (Postgres)
-
-From repo root:
-
-docker compose down
-
-
-If you want to delete DB volume data:
-
-docker compose down -v
-
+```
 
 ---
 
-## PART 7 — Streamlit UI (workflow)
+### Step D — Open Swagger (API UI)
 
-```md
+Open this in your browser:
+
+* `http://127.0.0.1:8000/docs`
+
+Recommended Swagger test order:
+
+1. `GET /health`
+2. `GET /schema`
+3. `POST /rag/build`
+4. `POST /rag/debug` with:
+
+   ```json
+   { "question": "Top 10 parts by excess value for EOL parts" }
+   ```
+5. `POST /nlq` with:
+
+   ```json
+   { "question": "Top 10 parts by excess value for EOL parts" }
+   ```
+
+---
+
 ## Streamlit UI
 
 ### 1) Start backend first
+
 ```powershell
 python -m uvicorn app.api.main:app --reload --port 8000
+```
 
-2) Start Streamlit
+### 2) Start Streamlit (new terminal, venv active)
 
-In a second terminal (venv active):
-
+```powershell
 streamlit run ui/streamlit_app.py
+```
 
-3) What UI does
+### What the UI does (simple)
 
-NLQ: sends question to /nlq and shows results + SQL + citations
-
-RAG Build: triggers /rag/build (explicit action)
-
-RAG Debug: triggers /rag/debug to show retrieval + rerank selection
-
-Run SQL: sends SQL to /query (still validated)
-
+* **NLQ**: calls `/nlq` and displays SQL + results + citations
+* **RAG Build**: calls `/rag/build`
+* **RAG Debug**: calls `/rag/debug` for retrieval + rerank inspection
+* **Run SQL**: calls `/query` (still validated)
 
 ---
 
-## PART 8 — Eval harness (how to run + not accidentally burn tokens)
+## Stopping everything safely
 
-```md
-## Eval Harness
+### Stop FastAPI
+
+In the terminal running uvicorn:
+
+* Press `CTRL + C`
+
+### Stop Docker Postgres
+
+From the repo root:
+
+```powershell
+docker compose down
+```
+
+If you want to delete the DB data volume too:
+
+```powershell
+docker compose down -v
+```
+
+---
+
+## Eval harness (optional, measurable quality)
 
 ### What it is
-A repeatable script to measure system quality using a fixed question set.
+
+Batch-run a fixed set of NLQ questions to measure:
+
+* pass rate
+* unsafe SQL blocked rate
+* latency
+* common failure modes
 
 ### Files
-- `tests/evals.jsonl` — list of NLQ questions
-- `scripts/run_evals.py` — runs NLQ in batch and outputs metrics
 
-### How to run
-Make sure API is running, then:
+* `tests/evals.jsonl`
+* `scripts/run_evals.py`
+
+### Run
+
 ```powershell
-python scripts\run_evals.py
+python scripts/run_evals.py
+```
 
-Important: avoiding accidental LLM spend
+### To avoid accidental spend
 
-This project uses explicit switches so you don’t accidentally burn tokens.
+Keep this in `.env` unless you are explicitly running evals:
 
-Recommended defaults in .env:
-
+```env
 EVALS_ENABLED=false
-RERANK_ENABLED=true
-AUDIT_ENABLED=true
-
-
-Only set EVALS_ENABLED=true when you explicitly want to run evals.
-
-If EVALS_ENABLED=false, run_evals.py should exit early (recommended behavior).
-
+```
 
 ---
 
-## PART 9 — Audit logging (governance)
+## Audit logging (optional, governance)
 
-```md
-## Audit Logging
+### Where logs are written
 
-### What gets logged
-Each NLQ request writes one JSON line to:
-- `.logs/audit.jsonl`
+Audit logs are written to:
 
-Typical fields:
-- timestamp
-- question
-- retrieved doc ids
-- rerank selected ids
-- generated sql
-- execution row_count
-- latency
-- prompt_version / kb_version
+* `.logs/audit.jsonl`
 
-### Why it matters
-This is essential for:
-- debugging incorrect queries
-- measuring drift
-- investigating incidents
-- improving prompts + retrieval with evidence
+### Confirm logs exist
 
-### How to confirm logs are written
-1) Ensure `.env` contains:
-```env
-AUDIT_ENABLED=true
-
-
-Run an NLQ call.
-
-Check:
-
+```powershell
 dir .logs
 type .logs\audit.jsonl
+```
 
+### To disable audit logs
+
+Set in `.env`:
+
+```env
+AUDIT_ENABLED=false
+```
+
+```
+::contentReference[oaicite:0]{index=0}
+```
+
+
+## Concepts Used (and Why)
+
+* **Natural Language Query (NLQ)**
+    * Users ask questions in plain English.
+    * This is the manager-friendly interface.
+* **Text-to-SQL**
+    * The system generates SQL from NLQ.
+    * Useful only if it stays safe and correct.
+* **Embeddings (Vector Search)**
+    * Transforms text into vectors to search by meaning.
+    * Used for semantic retrieval across schema, glossary, and examples.
+* **RAG (Retrieval-Augmented Generation)**
+    * Injects authoritative context before generation.
+    * Stops the model from guessing schema or inventing columns.
+* **Hybrid Retrieval (Vector + BM25)**
+    * **Vector** = semantic matching; **BM25** = exact keyword matching.
+    * Hybrid improves enterprise reliability for specific column names, IDs, and lifecycle states.
+* **Reranking (LLM)**
+    * Selects only the best chunks for SQL generation.
+    * Results in higher accuracy and lower hallucination risk.
+* **SQL Guardrails**
+    * Validator blocks dangerous SQL and enforces safe patterns.
+    * Mandatory for production usage.
+* **Audit Logging**
+    * Captures full trace for governance and debugging.
+    * Helps explain why a query happened and how to improve it.
+* **Evaluation Harness**
+    * Measures quality over time with repeatable tests.
+    * Turns iteration into an engineering process.
 
 ---
 
-## PART 10 — Concepts used (and why)
+## Interview-Ready Narrative (What You Built)
 
-```md
-## Concepts Used (and why)
+* **Reproducible Environment:** Built a reproducible data environment using Postgres in Docker with a custom CSV loader.
+* **API-First Design:** Exposed all functionality through a FastAPI backend with full Swagger documentation.
+* **Advanced RAG:** Implemented RAG over schema, business definitions, and specific SQL examples to ensure accuracy.
+* **Reliability:** Added hybrid retrieval and caching to increase both reliability and speed.
+* **Production Patterns:** Integrated LLM reranking to tighten context, a common pattern in production-grade AI.
+* **Security & Governance:** Added strict SQL validation guardrails and audit logging for traceability.
+* **Measurable Progress:** Developed an eval harness to quantify improvements over time.
+* **User Interface:** Built a minimal Streamlit UI to make the tool immediately usable by analysts and managers.
 
-### RAG (Retrieval-Augmented Generation)
-Used so the model can reference **real schema + business definitions + examples** instead of guessing.
+---
 
-### Hybrid Retrieval (Vector + BM25)
-Vector retrieval = semantic similarity  
-BM25 = keyword precision  
-Hybrid = better accuracy on real enterprise data (IDs, column names, abbreviations).
-
-### Reranking
-Reduces context from “maybe relevant” to “most relevant”.  
-Improves accuracy and reduces hallucinations.
-
-### Prompt Versioning + KB Versioning
-Makes experiments trackable.  
-If SQL quality changes, you can attribute it to prompt or knowledge base changes.
-
-### SQL Guardrails
-Prevents unsafe queries and ensures the system is safe to run in production-like settings.
-
-### Audit Logging
-Adds traceability and governance.  
-Real teams need this for compliance and debugging.
-
-### Evaluation Harness
-Lets you measure progress and avoid “it feels better” development.
-
-PART 11 — Interview-ready “How I built this” narrative
-## How I built this (interview narrative)
-
-1) I created a reproducible data environment (Postgres in Docker + CSV loader).
-2) I exposed the system through a FastAPI backend with clean endpoints and Swagger.
-3) I implemented RAG over three knowledge sources:
-   - schema / relationships
-   - business definitions
-   - SQL examples
-4) I used hybrid retrieval and caching to improve reliability and speed.
-5) I added an LLM reranker to narrow context before generation (production pattern).
-6) I built strict SQL validation guardrails and fail-safe error handling.
-7) I added governance: audit logs capturing full trace from question → SQL → execution.
-8) I built an eval harness to quantify quality and track improvements.
-9) I wrapped everything in a minimal Streamlit UI for real usage.
 
