@@ -33,11 +33,11 @@ from app.observability.audit import write_audit
 from app.pipeline import prompts as P
 from app.pipeline.memory import Turn, format_history, memory
 from app.pipeline.outputs import AnswerSummary, DefinitionAnswer, QueryRewrite, RouteDecision, SQLGeneration
-from app.rag import semantic_cache
+from app.rag import semantic_cache, vector_store
 from app.rag.context import build_context
 from app.rag.documents import Chunk
 from app.rag.reranker import rerank
-from app.rag.retriever import retrieve
+from app.rag.retriever import expand_with_schema_graph, retrieve
 from app.sql import executor
 from app.sql.catalog import compact_schema
 from app.sql.validator import validate_sql
@@ -164,13 +164,16 @@ def node_retrieve(st: PipelineState) -> dict:
 def node_rerank(st: PipelineState) -> dict:
     s = get_settings()
     fused = [c for c in st.candidates if "expanded" not in c.signals]
-    expanded = [c for c in st.candidates if "expanded" in c.signals]
     if s.use_rerank:
         kept, meta = rerank(st.standalone_question, fused, s.context_top_n)
     else:
         kept, meta = fused[: s.context_top_n], {"used": False, "reason": "disabled"}
-    # graph-expanded schema chunks are always kept: they are cheap and prevent join hallucinations
-    st.context_chunks = kept + [c for c in expanded if c.id not in {k.id for k in kept}]
+    # Expand along the FK graph from the *kept* chunks only (after rerank), so the model gets every
+    # table + join edge it needs for the chosen examples, without schema for tables nobody kept.
+    pool = [c for c in st.candidates] + vector_store.all_chunks()
+    pool = list({c.id: c for c in pool}.values())
+    st.context_chunks = expand_with_schema_graph(kept, pool)
+    meta["graph_expanded"] = [c.title for c in st.context_chunks[len(kept) :]]
     st.context_text, st.context_chunks = build_context(st.context_chunks, s.context_max_chars)
     st.citations = [c.id for c in st.context_chunks]
     st.rerank_meta = meta
@@ -325,14 +328,8 @@ def run_pipeline_iter(question: str, *, execute: bool = True, session_id: str | 
     yield _step(st, "guard", node_guard)
     if not _done(st):
         yield _step(st, "contextualize", node_contextualize)
+    # Cache before routing: a repeated/paraphrased question costs zero LLM calls.
     if not _done(st):
-        yield _step(st, "route", node_route)
-
-    if not _done(st) and st.intent == "definition":
-        yield _step(st, "retrieve", node_retrieve)
-        if not _done(st):
-            yield _step(st, "answer_definition", node_answer_definition)
-    elif not _done(st):
         yield _step(st, "cache_lookup", node_cache_lookup)
         if st.cached_response is not None:
             resp = dict(st.cached_response)
@@ -347,6 +344,14 @@ def run_pipeline_iter(question: str, *, execute: bool = True, session_id: str | 
             _finish(st, usage, resp)
             yield {"type": "final", "response": resp}
             return
+    if not _done(st):
+        yield _step(st, "route", node_route)
+
+    if not _done(st) and st.intent == "definition":
+        yield _step(st, "retrieve", node_retrieve)
+        if not _done(st):
+            yield _step(st, "answer_definition", node_answer_definition)
+    elif not _done(st):
         for name, fn in (
             ("retrieve", node_retrieve),
             ("rerank", node_rerank),

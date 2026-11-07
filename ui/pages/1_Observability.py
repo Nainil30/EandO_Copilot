@@ -21,8 +21,8 @@ if not m.get("requests"):
 c = st.columns(6)
 c[0].metric("Requests", m["requests"])
 c[1].metric("Success rate", f"{m['success_rate']:.0%}")
-c[2].metric("p50 latency", f"{m['latency_ms']['p50']} ms")
-c[3].metric("p95 latency", f"{m['latency_ms']['p95']} ms")
+c[2].metric("p50 latency", f"{m['latency_ms']['p50'] / 1000:.1f} s")
+c[3].metric("p95 latency", f"{m['latency_ms']['p95'] / 1000:.1f} s")
 c[4].metric("Cache hit rate", f"{m['cache_hit_rate']:.0%}")
 c[5].metric("Est. cost", f"${m['est_cost_usd_total']:.4f}")
 

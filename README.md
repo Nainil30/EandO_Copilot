@@ -11,12 +11,18 @@
 ![RAG](https://img.shields.io/badge/RAG-hybrid%20%2B%20RRF%20%2B%20rerank-purple)
 ![MCP](https://img.shields.io/badge/MCP-server-black)
 
-```
-You:     Which EOL parts have both LTB orders and excess?
-Copilot: <2-4 sentence answer grounded in the returned rows, with the key numbers>
-         [bar chart] [SQL tab] [sources: fact_ltb_orders, fact_excess_calculation, glossary: Last Time Buy, ...]
-         confidence · latency · LLM calls · tokens · $ cost        (shape of a response, not real output)
-```
+![Chat answer with grounded summary and ranked chart](docs/images/chat_answer.jpg)
+
+**Measured results** ([details](docs/eval_results.md)): **37/37** golden cases pass · **100%** soft execution
+accuracy · **100%** retrieval table recall · **6/6** attacks blocked · ~5 s p50 · ~4.4K tokens/question ·
+**$0** on the Gemini free tier, with a hard daily usage cap.
+
+| SQL tab + semantic-cache hit (0 LLM calls) | Retrieval lab: dense vs BM25 vs RRF fusion | Observability |
+|---|---|---|
+| ![SQL tab](docs/images/sql_and_cache_hit.jpg) | ![Retrieval lab](docs/images/retrieval_lab.jpg) | ![Observability](docs/images/observability.jpg) |
+
+**New here?** Read **[docs/concepts.md](docs/concepts.md)**: all 44 concepts used, each with *what it is, why
+I used it, the alternatives, and where it lives in the code*.
 
 ---
 
@@ -93,15 +99,17 @@ synthetic (no company data), but the schema, metrics and workflows are realistic
 | | **Grounded answer synthesis** + automatic chart selection | `node_summarize` |
 | **Safety** | 3 layers: input guard → **sqlglot AST validator** → **read-only role + READ ONLY txn + timeout** | [`app/guardrails`](app/guardrails/input_guard.py), [`app/sql/validator.py`](app/sql/validator.py), [`db/schema.sql`](db/schema.sql) |
 | | Prompt-injection heuristics, function/catalog deny-lists, LIMIT injection | |
-| **LLMOps** | **Semantic cache** (embedding similarity ≥ 0.95, version-scoped) | [`app/rag/semantic_cache.py`](app/rag/semantic_cache.py) |
+| **LLMOps** | **Hard daily usage budget** (calls + tokens), refused before any API request | [`app/llm/budget.py`](app/llm/budget.py) |
+| | **Semantic cache** (embedding similarity ≥ 0.95, version-scoped): repeats cost 0 LLM calls | [`app/rag/semantic_cache.py`](app/rag/semantic_cache.py) |
+| | **Embedding cache**: KB rebuilds cost 0 API calls | `LLMProvider.embed()` |
 | | Token + **cost accounting** per request, per step | [`app/llm/base.py`](app/llm/base.py) |
 | | JSONL **audit trail**, feedback loop, online metrics | [`app/observability`](app/observability/audit.py) |
-| | Retries with exponential backoff + jitter | `with_retries()` |
+| | Retries with exponential backoff + jitter, **model fallback chain** on 503/429 | `with_retries()`, `GeminiProvider._generate_text` |
 | **Evaluation** | **Execution accuracy** vs gold SQL, table recall@context, guardrail block rate, **LLM-as-judge**, CI quality gate | [`evals/run_evals.py`](evals/run_evals.py) |
 | **Interop** | **MCP server**: use the copilot from Claude Desktop / Claude Code / Cursor | [`app/mcp_server.py`](app/mcp_server.py) |
 | | **Provider-agnostic**: Gemini, OpenAI-compatible (OpenAI, Azure, **Ollama**, vLLM), offline fake | [`app/llm/`](app/llm/factory.py) |
 | **Engineering** | FastAPI v1 API, SSE streaming, API keys, rate limiting, request IDs, typed settings | [`app/api`](app/api/main.py), [`app/config.py`](app/config.py) |
-| | Docker Compose stack, GitHub Actions (lint, 67 tests, Postgres integration, eval run, image build) | [`docker-compose.yml`](docker-compose.yml), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
+| | Docker Compose stack, GitHub Actions (lint, 75 tests, Postgres integration, eval run, image build) | [`docker-compose.yml`](docker-compose.yml), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
 
 ---
 
@@ -117,12 +125,12 @@ flowchart LR
     subgraph G[Agentic pipeline - app/pipeline/graph.py]
         direction TB
         IG[1. Input guard] --> CX[2. Contextualize<br/>memory + rewrite]
-        CX --> RT{3. Route intent}
+        CX --> SC{3. Semantic cache}
+        SC -->|hit: 0 LLM calls| OUT[Response]
+        SC -->|miss| RT{4. Route intent}
         RT -->|definition| DEF[Glossary answer + citations]
         RT -->|unsafe / off-topic| STOP[Refuse]
-        RT -->|data_query| SC{4. Semantic cache}
-        SC -->|hit| OUT[Response]
-        SC -->|miss| RET[5. Hybrid retrieve<br/>BM25 + dense → RRF → FK-graph expand]
+        RT -->|data_query| RET[5. Hybrid retrieve<br/>BM25 + dense → RRF → FK-graph expand]
         RET --> RR[6. LLM rerank 12 → 6]
         RR --> GEN[7. Generate SQL<br/>structured output]
         GEN --> VAL[8. AST validate]
@@ -152,6 +160,7 @@ flowchart LR
 | Agent interop | MCP Python SDK | Tools: `ask_eando`, `run_readonly_sql`, `describe_schema`, `search_knowledge_base` |
 
 Deeper write-up: [`docs/architecture.md`](docs/architecture.md). Design trade-offs: [`docs/decisions.md`](docs/decisions.md).
+**Every concept explained (what / why / alternatives / where in code): [`docs/concepts.md`](docs/concepts.md).**
 
 ### Data model
 
@@ -180,8 +189,8 @@ Example: *"Top 10 suppliers by total excess value"*
 |---|---|---|---|
 | 1 | `guard` | Regex checks for injection phrases, destructive intent, length | Blocks obvious attacks at zero cost (no LLM call) |
 | 2 | `contextualize` | If the session has history, rewrite the follow-up into a standalone question and extract schema keywords | "only Taiwan" becomes "Top 10 suppliers by total excess value where country = Taiwan" |
-| 3 | `route` | Fast model classifies `data_query / definition / out_of_scope / unsafe` (structured output) | Cheap model for cheap decisions; definitions skip SQL entirely |
-| 4 | `cache_lookup` | Embed the question (`RETRIEVAL_QUERY`); cosine ≥ 0.95 against cached questions returns instantly | Paraphrases hit the cache; scoped to KB + prompt version |
+| 3 | `cache_lookup` | Embed the question (`RETRIEVAL_QUERY`); cosine ≥ 0.95 against cached questions returns instantly, **before** routing, so a repeat costs 0 LLM calls | Paraphrases hit the cache; scoped to KB + prompt version |
+| 4 | `route` | Fast model classifies `data_query / definition / out_of_scope / unsafe` (structured output) | Cheap model for cheap decisions; definitions skip SQL entirely |
 | 5 | `retrieve` | Dense top-12 + BM25 top-12 → **RRF** → add join edges / tables implied by top chunks | Dense finds meaning ("over-stock"), BM25 finds identifiers (`calculated_excess`) |
 | 6 | `rerank` | Fast LLM selects the 6 most useful chunks; graph-expanded schema is always kept | Precision: less noise means fewer hallucinated joins |
 | 7 | `generate_sql` | Smart model returns `{plan, sql, tables_used, assumptions, confidence, needs_clarification}` | Typed output, explainability, and a clarification path instead of guessing |
@@ -301,7 +310,7 @@ Tools exposed: `ask_eando`, `run_readonly_sql`, `describe_schema`, `search_knowl
 ## 7. Evaluation
 
 "It looked right in the demo" is not a metric. [`evals/golden.jsonl`](evals/golden.jsonl) has **37 cases**
-across 11 categories (excess, inventory, lifecycle, dates, forecast, BOM, LTB, scrap, joins, edge cases,
+across 11 data categories (excess, inventory, lifecycle, dates, forecast, BOM, LTB, scrap, joins, edge cases,
 limits) plus 6 adversarial **governance** cases and 2 **definition** cases. Most data cases have a hand-written
 `gold_sql`.
 
@@ -326,9 +335,22 @@ Reports are written to `reports/eval_<ts>.md` and `.json` with a per-category br
 **Workflow:** change one thing (prompt, `RRF_K`, `CONTEXT_TOP_N`, reranker on/off, model), re-run, and
 compare. Bump `PROMPT_VERSION` / `KB_VERSION` so audit records stay attributable.
 
-> Fill in your own numbers after running with your key, e.g. "Soft EX 0.89, table recall 0.97, 100% guardrail
-> block rate, p50 2.3 s, $0.002/question on gemini-2.5-flash". Real measured numbers are the strongest thing
-> you can show a recruiter.
+### Measured results (2026-11-07, real Gemini + Postgres)
+
+| Metric | Result |
+|---|---|
+| Golden cases passing | **37 / 37** (all 13 categories) |
+| Soft execution accuracy (26 gold-SQL cases) | **100%** |
+| Strict execution accuracy | 58% (the model adds helpful extra columns) |
+| Table recall @ context | **100%** |
+| Guardrail block rate | **6 / 6** |
+| Latency p50 | ~5 s (free tier) |
+| Tokens / question | ~4,400 → about $0.002 at list price, **$0 on the free tier** |
+
+Getting there took eight diagnosed issues: a retired model, provider overload, a DNS blip, two ambiguous gold
+answers, a data-generator bug (Faker `"-12m"` = minutes!), a free-tier rate limit, and one genuine model error
+(few-shot over-copying, fixed with prompt `sql-v4`). The full iteration log is in
+**[docs/eval_results.md](docs/eval_results.md)**.
 
 ---
 
@@ -361,6 +383,20 @@ Security violations are **never sent to the repair loop**. They end the request.
   repair use the smart model. Combined with the semantic cache, this cuts cost substantially compared with
   using one big model for every call.
 
+### Keeping API cost near zero
+
+| Protection | Effect |
+|---|---|
+| **Gemini free tier** | If billing is **not** enabled on the Google Cloud project behind your key, you cannot be charged. Over-limit requests just get a 429. Check at https://aistudio.google.com/usage |
+| **Hard daily budget** (`LLM_DAILY_CALL_LIMIT=300`, `LLM_DAILY_TOKEN_LIMIT=500000`) | Requests past the cap are refused locally before reaching Google. `GET /ready` shows today's usage |
+| **Embedding cache** | Rebuilding the knowledge base after the first time costs 0 API calls |
+| **Semantic cache before routing** | Repeated or paraphrased questions cost 0 LLM calls |
+| **Model tiering** | 4 of the ~5 calls per question use the `lite` model |
+| **No Pro models by default** | `gemini-3.5-flash` / `-flash-lite`. Avoid `*-pro` unless you need it |
+| **Offline mode** | `LLM_PROVIDER=fake` runs the whole app and the test suite with zero API calls |
+
+A typical question uses about 4 LLM calls and ~6K tokens. A full 37-case eval run stays well inside the daily cap.
+
 ---
 
 ## 10. Configuration
@@ -371,7 +407,9 @@ environment variables. See [`.env.example`](.env.example).
 | Variable | Default | Notes |
 |---|---|---|
 | `LLM_PROVIDER` | `gemini` | `gemini` · `openai` (any OpenAI-compatible URL, incl. Ollama) · `fake` |
-| `GEMINI_SQL_MODEL` / `GEMINI_FAST_MODEL` | `gemini-2.5-flash` / `-flash-lite` | Smart vs fast tier |
+| `GEMINI_SQL_MODEL` / `GEMINI_FAST_MODEL` | `gemini-3.5-flash` / `gemini-3.5-flash-lite` | Smart vs fast tier |
+| `GEMINI_FALLBACK_MODELS` | `gemini-flash-latest,gemini-flash-lite-latest` | Tried when the primary is overloaded |
+| `LLM_DAILY_CALL_LIMIT` / `LLM_DAILY_TOKEN_LIMIT` | 300 / 500,000 | Hard daily caps (0 = unlimited) |
 | `GEMINI_EMBED_MODEL`, `EMBEDDING_DIM` | `gemini-embedding-001`, 768 | Matryoshka truncation |
 | `RETRIEVAL_TOP_K`, `CONTEXT_TOP_N`, `RRF_K` | 12, 6, 60 | Retrieval funnel |
 | `USE_RERANK`, `USE_QUERY_REWRITE`, `USE_SEMANTIC_CACHE` | true | Feature flags for ablations |
@@ -379,7 +417,7 @@ environment variables. See [`.env.example`](.env.example).
 | `MAX_REPAIR_ATTEMPTS` | 2 | Self-healing budget |
 | `SQL_STATEMENT_TIMEOUT_MS`, `SQL_MAX_ROWS`, `SQL_DEFAULT_LIMIT` | 8000, 1000, 100 | Execution guardrails |
 | `READONLY_DATABASE_URL` | – | Least-privilege role for generated SQL |
-| `KB_VERSION`, `PROMPT_VERSION` | v2, sql-v3 | Written to every audit record |
+| `KB_VERSION`, `PROMPT_VERSION` | v2, sql-v4 | Written to every audit record |
 | `API_KEYS`, `RATE_LIMIT_PER_MINUTE` | empty, 60 | Empty = auth off (dev) |
 
 ---
@@ -413,7 +451,7 @@ app/
   mcp_server.py             MCP tools for external agents
 ui/                         Streamlit chat + Observability + Knowledge Base pages
 evals/                      golden set + evaluation harness
-tests/                      67 offline tests (fake LLM, fake warehouse)
+tests/                      75 offline tests (fake LLM, fake warehouse)
 scripts/                    data generator, loader, one-command bootstrap
 docs/                       glossary + SQL examples (KB sources), architecture, ADRs, guides
 db/schema.sql               warehouse DDL, indexes, read-only role
@@ -424,7 +462,7 @@ db/schema.sql               warehouse DDL, indexes, read-only role
 ## 12. Testing & CI
 
 ```bash
-pytest                 # 67 tests, ~5 s, no API key / Docker / DB needed
+pytest                 # 75 tests, ~10 s, no API key / Docker / DB needed
 ruff check . && ruff format --check app tests evals scripts
 ```
 
@@ -480,7 +518,10 @@ A full talk track with likely questions and strong answers is in
 | `/ready` says `degraded`, DB ❌ | `docker compose up -d postgres`; check `DATABASE_URL` |
 | KB 0 chunks | `python -m scripts.bootstrap --kb-only` or the UI's **Build KB** |
 | `API key not valid` | Regenerate at AI Studio, update `GEMINI_API_KEY`, restart the API |
-| 429 / `RESOURCE_EXHAUSTED` | Free-tier limit. Retries back off automatically; for evals use `--sleep-ms 500` |
+| 429 / `RESOURCE_EXHAUSTED` | Free-tier rate limit (15 req/min on lite models). Retries wait for the server's `retry in Ns` hint; for evals use `--sleep-ms 2000` |
+| `404 ... no longer available to new users` | Google retired that model. Set `GEMINI_SQL_MODEL` / `GEMINI_FAST_MODEL` to a current one (list them with `client.models.list()`) |
+| `Daily LLM call limit reached` | The budget guard did its job. Raise `LLM_DAILY_CALL_LIMIT` in `.env` or wait for the next UTC day |
+| 503 "high demand" | Transient. Retries plus `GEMINI_FALLBACK_MODELS` handle it automatically |
 | `password authentication failed for copilot_readonly` | Run `python -m scripts.bootstrap` (re-applies the role) or unset `READONLY_DATABASE_URL` |
 | Chroma / NumPy errors | Keep `numpy<2` (pinned) and Python 3.11 |
 | Changed glossary / examples but answers didn't change | Rebuild the KB; bump `KB_VERSION` to invalidate the semantic cache |

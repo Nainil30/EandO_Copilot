@@ -17,6 +17,7 @@ class OpenAICompatProvider(LLMProvider):
 
     def __init__(self) -> None:
         self._s = get_settings()
+        self.embed_model = self._s.openai_embed_model
         headers = {"Content-Type": "application/json"}
         if self._s.openai_api_key:
             headers["Authorization"] = f"Bearer {self._s.openai_api_key}"
@@ -48,7 +49,7 @@ class OpenAICompatProvider(LLMProvider):
         text = data["choices"][0]["message"]["content"] or ""
         return text.strip(), int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0)), model
 
-    def embed(self, texts: list[str], *, task: EmbedTask = "document") -> list[list[float]]:
+    def _embed(self, texts: list[str], *, task: EmbedTask) -> list[list[float]]:
         if not texts:
             return []
         data = self._post("/embeddings", {"model": self._s.openai_embed_model, "input": texts})

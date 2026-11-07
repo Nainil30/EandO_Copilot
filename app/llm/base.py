@@ -96,17 +96,28 @@ class TransientLLMError(LLMError):
     """Rate limit / timeout / 5xx – safe to retry."""
 
 
+_RETRY_HINT = re.compile(r"retry in (\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+MAX_HINTED_WAIT_S = 40.0
+
+
+def retry_delay(error: Exception, attempt: int, base_delay: float = 0.8) -> float:
+    """Honour the server's "retry in Ns" hint (rate limits); otherwise exponential backoff with full jitter."""
+    m = _RETRY_HINT.search(str(error))
+    if m:
+        return min(float(m.group(1)) + 1.0, MAX_HINTED_WAIT_S)
+    return random.uniform(0, base_delay * (2 ** (attempt - 1)))
+
+
 def with_retries(fn: Callable[[], Any], *, max_retries: int = 3, base_delay: float = 0.8) -> Any:
     attempt = 0
     while True:
         try:
             return fn()
-        except TransientLLMError:
+        except TransientLLMError as e:
             attempt += 1
             if attempt > max_retries:
                 raise
-            # exponential backoff with full jitter
-            time.sleep(random.uniform(0, base_delay * (2 ** (attempt - 1))))
+            time.sleep(retry_delay(e, attempt, base_delay))
 
 
 _JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
@@ -147,9 +158,35 @@ class LLMProvider(ABC):
         """Return (text, input_tokens, output_tokens, model_name)."""
 
     @abstractmethod
-    def embed(self, texts: list[str], *, task: EmbedTask = "document") -> list[list[float]]: ...
+    def _embed(self, texts: list[str], *, task: EmbedTask) -> list[list[float]]:
+        """Provider-specific embedding call (no caching / budgeting)."""
+
+    #: Providers that cost money are metered against the daily budget.
+    metered: bool = True
+    embed_model: str = "default"
 
     # ---- public API ------------------------------------------------------
+    def embed(self, texts: list[str], *, task: EmbedTask = "document") -> list[list[float]]:
+        """Embed texts, serving repeats from the on-disk cache and enforcing the daily budget."""
+        if not texts:
+            return []
+        if not self.metered:
+            return self._embed(texts, task=task)
+        from app.llm import budget
+
+        cached = budget.get_cached_embeddings(self.embed_model, task, texts)
+        missing = [t for t, v in zip(texts, cached) if v is None]
+        if missing:
+            budget.check_budget()
+            from app.config import get_settings
+
+            fresh = with_retries(lambda: self._embed(missing, task=task), max_retries=get_settings().llm_max_retries)
+            budget.record_usage(calls=1, tokens=sum(len(t) for t in missing) // 4)
+            budget.put_cached_embeddings(self.embed_model, task, missing, fresh)
+            by_text = dict(zip(missing, fresh))
+            cached = [v if v is not None else by_text[t] for t, v in zip(texts, cached)]
+        return cached  # type: ignore[return-value]
+
     def generate(
         self,
         prompt: str,
@@ -184,11 +221,17 @@ class LLMProvider(ABC):
     ) -> tuple[str, str]:
         from app.config import get_settings
 
+        if self.metered:
+            from app.llm import budget
+
+            budget.check_budget()
         t0 = time.perf_counter()
         text, tin, tout, model = with_retries(
             lambda: self._generate_text(prompt, system=system, tier=tier, json_schema=json_schema),
             max_retries=get_settings().llm_max_retries,
         )
+        if self.metered:
+            budget.record_usage(calls=1, tokens=tin + tout)
         tracker = current_usage()
         if tracker is not None:
             tracker.add(

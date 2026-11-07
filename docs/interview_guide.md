@@ -70,26 +70,43 @@ pgvector or a managed vector DB, Redis for memory/cache/rate limits, OIDC with r
 business unit, traces to OpenTelemetry/Langfuse, a feedback-to-eval promotion workflow, and canary-testing
 prompt versions against the golden set.
 
-**What failed / what did you learn?**
-(Use your real story.) Examples from building v1 → v2: Chroma `include=["ids"]` errors; queries embedded
-with the document task type, which silently hurt recall; the regex validator was bypassable; the reranker
-parsed JSON by hand and failed silently; the eval set referenced platforms that didn't exist ("PowerEdge"),
-which taught me to validate eval data too.
+**What failed / what did you learn?** These all actually happened while building this:
+1. **Evals found a data bug, not a model bug.** The first real eval run flagged "LTB orders, most recent 20"
+   as wrong. The SQL was correct, but every LTB order had the same date: in Faker, `"-12m"` means 12
+   *minutes*, not months, so all "random" dates collapsed onto today. *Lesson: when a metric fails, check the
+   data and the gold answer before blaming the model.*
+2. **Ambiguous gold answers.** Two gold queries had no LIMIT or a different sort order than the question
+   implied, so a correct model answer "failed". I rewrote them to be deterministic. *Lesson: eval datasets
+   need review too. Execution accuracy is only as good as the gold set.*
+3. **Model retirement in production.** `gemini-2.5-flash-lite` started returning 404 "no longer available to
+   new users". That's why model names are configuration, not code.
+4. **Overload.** `gemini-3.5-flash` returned 503 "high demand", so I added a **model fallback chain**. The
+   trace shows which model actually answered.
+5. **Network blips.** A DNS failure mid-eval failed 6 cases because connection errors weren't classified as
+   retryable. Now they are, and embedding calls get the same retry wrapper as generation calls.
+6. **From v1 → v2:** questions were embedded with the *document* task type (silently hurting recall), the
+   regex SQL validator was bypassable, the reranker parsed JSON by hand and failed silently, and the eval set
+   referenced platforms that didn't exist ("PowerEdge").
 
-## 4. Numbers to have ready (fill in from your own eval run)
+## 4. Numbers to have ready (measured 2026-11-07, see [eval_results.md](eval_results.md))
 
 | Metric | Value |
 |---|---|
-| Soft execution accuracy | ____ |
-| Table recall@context | ____ |
-| Guardrail block rate | ____ |
-| Repair rate / repair success | ____ |
-| p50 / p95 latency | ____ |
-| Avg cost per question | ____ |
-| Cache hit latency | ____ |
-| Ablation: rerank off / graph expansion off | ____ |
+| Golden cases passing | **37 / 37**, all 13 categories |
+| Soft execution accuracy | **100%** (26 gold-SQL cases); strict 58% because of helpful extra columns |
+| Table recall@context | **100%**, so retrieval was never the bottleneck |
+| Guardrail block rate | **6 / 6** adversarial prompts |
+| Repair rate | 0% on the golden set (the loop is unit-tested with injected DB errors) |
+| Latency p50 | ~5 s on the free tier |
+| Cost per question | ~4,400 tokens → about $0.002 at list price; $0 on the free tier |
+| Cache hit | **12 ms, 0 LLM calls** (vs ~10-16 s for a full run) |
+| Post-rerank graph expansion | **13–17% fewer tokens** at the same accuracy |
+| Genuine model error found and fixed | Few-shot over-copying (E23) → prompt rule, `sql-v3` → `sql-v4` |
 
 ## 5. Concept cheat sheet
+
+The full version, with *why* and *alternatives* for each of 44 concepts, is in [concepts.md](concepts.md).
+
 
 - **RAG:** retrieve relevant context, then generate conditioned on it, to ground the model in your data.
 - **Dense vs sparse retrieval:** embeddings (semantic) vs BM25 (lexical, exact terms).

@@ -65,10 +65,11 @@ def _tag(name: str, text: str) -> str:
 
 class FakeProvider(LLMProvider):
     name = "fake"
+    metered = False  # free + offline: never counted against the budget
     dim = 384
 
     # ---- embeddings: signed feature hashing over word tokens --------------
-    def embed(self, texts: list[str], *, task: EmbedTask = "document") -> list[list[float]]:
+    def _embed(self, texts: list[str], *, task: EmbedTask) -> list[list[float]]:
         vecs = []
         for t in texts:
             v = [0.0] * self.dim

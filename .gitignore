@@ -25,3 +25,6 @@ data/*.csv
 .vscode/
 .idea/
 .DS_Store
+
+# local tooling
+.claude/

@@ -114,7 +114,8 @@ resume on a different worker thread.
 
 | Cache | Key | Invalidation |
 |---|---|---|
-| Semantic cache | question embedding, cosine ≥ 0.95 | TTL (1 h) + scope `kb_version|prompt_version|provider`; cleared on KB build |
+| Semantic cache (checked *before* routing → repeats cost 0 LLM calls) | question embedding, cosine ≥ 0.95 | TTL (1 h) + scope `kb_version|prompt_version|provider`; cleared on KB build |
+| Embedding cache | sha256(model, task, text) on disk | 30-day TTL; content-addressed, never stale |
 | BM25 index | process memory | rebuilt lazily after `invalidate_bm25()` (KB build) |
 | Chroma client, LLM client, SQLAlchemy engines | singletons | process lifetime |
 
@@ -129,3 +130,10 @@ Only successful executed answers are cached, never errors or refusals.
 | Sync pipeline in threadpool | fine for tens of RPS | async providers + async SQLAlchemy |
 | Audit JSONL | local file | ship to OpenTelemetry / Langfuse / a warehouse table |
 | Auth | static API keys | OIDC + per-user row-level security in Postgres |
+
+## 10. Cost and reliability controls
+
+- **Daily budget** (`app/llm/budget.py`): calls and tokens per UTC day are checked before every request.
+- **Model fallback** (`GeminiProvider._generate_text`): primary → `GEMINI_FALLBACK_MODELS` on 503/429.
+- **Retries** with exponential backoff and jitter (`with_retries`).
+- **Fail-open optional steps:** reranker and summarizer errors degrade gracefully. They never fail the request.

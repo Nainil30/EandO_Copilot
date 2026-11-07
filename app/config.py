@@ -43,8 +43,10 @@ class Settings(BaseSettings):
     # fake    -> deterministic offline provider used in tests / CI / demos w/o keys
     llm_provider: Literal["gemini", "openai", "fake"] = "gemini"
     gemini_api_key: str | None = None
-    gemini_sql_model: str = "gemini-2.5-flash"
-    gemini_fast_model: str = "gemini-2.5-flash-lite"
+    gemini_sql_model: str = "gemini-3.5-flash"
+    gemini_fast_model: str = "gemini-3.5-flash-lite"
+    # Tried in order when the primary model is overloaded (503) or rate limited (429).
+    gemini_fallback_models: str = "gemini-flash-latest,gemini-flash-lite-latest"
     gemini_embed_model: str = "gemini-embedding-001"
     embedding_dim: int = 768  # Matryoshka truncation for gemini-embedding-001
 
@@ -56,6 +58,9 @@ class Settings(BaseSettings):
 
     llm_temperature: float = 0.0
     llm_max_retries: int = 3
+    # Hard daily caps (UTC day) on real API usage; 0 = unlimited. See app/llm/budget.py.
+    llm_daily_call_limit: int = 300
+    llm_daily_token_limit: int = 500_000
 
     # ---- RAG -----------------------------------------------------------
     chroma_dir: str = ".chroma"
@@ -76,7 +81,7 @@ class Settings(BaseSettings):
     summarize_results: bool = True
 
     # ---- prompt versions (traceability) ----------------------------------
-    prompt_version: str = "sql-v3"
+    prompt_version: str = "sql-v4"
 
     # ---- API security ----------------------------------------------------
     api_keys: str = ""  # comma-separated; empty = auth disabled (dev)
@@ -89,6 +94,10 @@ class Settings(BaseSettings):
     # Cost table (USD per 1M tokens) – used for per-request cost estimates.
     price_in_per_m: float = Field(default=0.30)
     price_out_per_m: float = Field(default=2.50)
+
+    @property
+    def gemini_fallback_model_list(self) -> list[str]:
+        return [m.strip() for m in self.gemini_fallback_models.split(",") if m.strip()]
 
     @property
     def api_key_set(self) -> set[str]:

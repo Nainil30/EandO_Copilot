@@ -34,7 +34,7 @@ def generate_platforms():
     ]
     df = pd.DataFrame(platforms)
     df.insert(0, "platform_id", range(1, len(df) + 1))
-    print(f"✅ Generated {len(df)} platforms")
+    print(f"Generated {len(df)} platforms")
     return df
 
 
@@ -56,7 +56,7 @@ def generate_suppliers():
         )
 
     df = pd.DataFrame(suppliers)
-    print(f"✅ Generated {len(df)} suppliers")
+    print(f"Generated {len(df)} suppliers")
     return df
 
 
@@ -100,9 +100,9 @@ def generate_parts(platforms_df):
         eol_date = None
         eoss_date = None
         if lifecycle in ["EOL", "EOSS", "Discontinued"]:
-            eol_date = fake.date_between(start_date="-18m", end_date="+6m")
+            eol_date = fake.date_between(start_date="-18M", end_date="+6M")
             if lifecycle in ["EOSS", "Discontinued"]:
-                eoss_date = fake.date_between(start_date=eol_date, end_date="+12m")
+                eoss_date = fake.date_between(start_date=eol_date, end_date="+12M")
 
         # Cost bands by commodity
         if commodity in ["DRAM", "SSD", "CPU"]:
@@ -127,7 +127,7 @@ def generate_parts(platforms_df):
         )
 
     df = pd.DataFrame(parts)
-    print(f"✅ Generated {len(df)} parts (unique part_number enforced)")
+    print(f"Generated {len(df)} parts (unique part_number enforced)")
     return df
 
 
@@ -154,7 +154,7 @@ def generate_bom(parts_df, platforms_df):
             bom_id += 1
 
     df = pd.DataFrame(records)
-    print(f"✅ Generated {len(df)} BOM rows")
+    print(f"Generated {len(df)} BOM rows")
     return df
 
 
@@ -190,7 +190,7 @@ def generate_inventory(parts_df, suppliers_df):
             inv_id += 1
 
     df = pd.DataFrame(records)
-    print(f"✅ Generated {len(df)} inventory rows")
+    print(f"Generated {len(df)} inventory rows")
     return df
 
 
@@ -228,7 +228,7 @@ def generate_forecast(parts_df, platforms_df, weeks=12):
             fc_id += 1
 
     df = pd.DataFrame(records)
-    print(f"✅ Generated {len(df)} forecast rows")
+    print(f"Generated {len(df)} forecast rows")
     return df
 
 
@@ -240,7 +240,7 @@ def generate_ltb_orders(parts_df, platforms_df, suppliers_df):
 
     for _, part in eol_parts.iterrows():
         if random.random() < 0.60:
-            order_date = fake.date_between(start_date="-12m", end_date="today")
+            order_date = fake.date_between(start_date="-12M", end_date="today")
             records.append(
                 {
                     "ltb_id": ltb_id,
@@ -249,7 +249,7 @@ def generate_ltb_orders(parts_df, platforms_df, suppliers_df):
                     "supplier_id": random.randint(1, len(suppliers_df)),
                     "order_date": order_date,
                     "qty_ordered": random.randint(1000, 12000),
-                    "expected_delivery_date": fake.date_between(start_date="today", end_date="+4m"),
+                    "expected_delivery_date": fake.date_between(start_date="today", end_date="+4M"),
                     "order_reason": random.choice(["EOL Final Buy", "Service Buffer", "Safety Stock"]),
                     "gsm_approver": fake.name(),
                 }
@@ -257,7 +257,7 @@ def generate_ltb_orders(parts_df, platforms_df, suppliers_df):
             ltb_id += 1
 
     df = pd.DataFrame(records)
-    print(f"✅ Generated {len(df)} LTB order rows")
+    print(f"Generated {len(df)} LTB order rows")
     return df
 
 
@@ -293,7 +293,7 @@ def generate_excess(parts_df, inventory_df, forecast_df):
             calc_id += 1
 
     df = pd.DataFrame(records)
-    print(f"✅ Generated {len(df)} excess calc rows")
+    print(f"Generated {len(df)} excess calc rows")
     return df
 
 
@@ -312,7 +312,7 @@ def generate_scrap_approvals(parts_df, excess_df):
                 "regrello_workflow_id",
             ]
         )
-        print("✅ Generated 0 scrap approvals (no excess)")
+        print("Generated 0 scrap approvals (no excess)")
         return df
 
     sample = excess_df.sample(frac=0.30, random_state=42)
@@ -341,14 +341,14 @@ def generate_scrap_approvals(parts_df, excess_df):
         appr_id += 1
 
     df = pd.DataFrame(records)
-    print(f"✅ Generated {len(df)} scrap approval rows")
+    print(f"Generated {len(df)} scrap approval rows")
     return df
 
 
 def save(df, name):
     path = os.path.join(OUT_DIR, f"{name}.csv")
     df.to_csv(path, index=False)
-    print(f"💾 saved: {path}  rows={len(df)}")
+    print(f"saved: {path}  rows={len(df)}")
 
 
 if __name__ == "__main__":
@@ -378,6 +378,6 @@ if __name__ == "__main__":
 
     # Sanity check: uniqueness
     uniq = parts_df["part_number"].nunique()
-    print(f"\n✅ Part numbers unique: {uniq}/{len(parts_df)}")
+    print(f"\nPart numbers unique: {uniq}/{len(parts_df)}")
 
     print("\nDone.\n")

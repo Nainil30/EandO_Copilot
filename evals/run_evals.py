@@ -16,6 +16,7 @@ Usage:
     python -m evals.run_evals                      # in-process (needs DB + KB)
     python -m evals.run_evals --api http://127.0.0.1:8000
     python -m evals.run_evals --category excess_value --judge
+    python -m evals.run_evals --ids E09,E11       # re-run specific cases
     python -m evals.run_evals --min-ex 0.7         # CI quality gate (non-zero exit if below)
 """
 
@@ -288,6 +289,7 @@ def main() -> int:
     ap.add_argument("--file", default=str(ROOT / "evals" / "golden.jsonl"))
     ap.add_argument("--api", default=None, help="Evaluate a running API instead of in-process")
     ap.add_argument("--category", default=None)
+    ap.add_argument("--ids", default=None, help="Comma-separated case ids to (re-)run, e.g. E09,E11")
     ap.add_argument("--judge", action="store_true", help="LLM-as-judge answer faithfulness")
     ap.add_argument("--out", default=str(ROOT / "reports"))
     ap.add_argument("--sleep-ms", type=int, default=0, help="Pause between cases (free-tier rate limits)")
@@ -297,6 +299,9 @@ def main() -> int:
     cases = load_cases(Path(args.file))
     if args.category:
         cases = [c for c in cases if c.get("category") == args.category]
+    if args.ids:
+        wanted = {i.strip() for i in args.ids.split(",")}
+        cases = [c for c in cases if c["id"] in wanted]
     print(f"Running {len(cases)} eval cases ({'api ' + args.api if args.api else 'in-process'})\n")
 
     results = []

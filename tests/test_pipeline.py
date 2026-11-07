@@ -17,8 +17,8 @@ def test_data_question_happy_path(warehouse):
     assert names == [
         "guard",
         "contextualize",
-        "route",
         "cache_lookup",
+        "route",
         "retrieve",
         "rerank",
         "generate_sql",
@@ -74,7 +74,7 @@ def test_semantic_cache_hit_on_repeat(warehouse):
     second = run_pipeline("Show scrap approval counts by status")
     assert first["cache_hit"] is None
     assert second["cache_hit"] and second["cache_hit"]["similarity"] >= 0.95
-    assert second["usage"]["llm_calls"] < first["usage"]["llm_calls"]
+    assert second["usage"]["llm_calls"] == 0 < first["usage"]["llm_calls"]
 
 
 def test_streaming_emits_steps_then_final(warehouse):

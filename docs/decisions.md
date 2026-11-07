@@ -77,3 +77,13 @@ Each record: **context → decision → consequences / trade-offs**. These are t
 ## ADR-016 JSONL audit log + feedback log
 - **Decision:** Append-only JSONL for requests and feedback. `/v1/metrics` aggregates them.
 - **Trade-offs:** Not queryable at scale. In production, ship it to OTel/Langfuse/warehouse. Thumbs-down + corrected SQL feed new eval cases.
+
+## ADR-017 Hard daily usage budget + embedding cache
+- **Context:** this is a portfolio project on a personal API key. Spend must stay near zero even if a bug, retry storm or long eval run goes wrong.
+- **Decision:** a small on-disk ledger counts calls and tokens per UTC day. Requests over `LLM_DAILY_CALL_LIMIT` / `LLM_DAILY_TOKEN_LIMIT` raise `BudgetExceededError` *before* any network call. Embeddings are cached by (model, task, text), and the semantic cache runs before routing.
+- **Consequences:** worst-case daily spend is bounded by configuration. KB rebuilds and repeat questions are free. Today's usage is visible at `/ready`.
+
+## ADR-018 Model fallback chain
+- **Context:** hosted models get retired (`gemini-2.5-flash-lite` returned 404 "no longer available to new users") and overloaded (`gemini-3.5-flash` returned 503 "high demand") while this was being built.
+- **Decision:** model names are configuration. On 503/429 the provider tries `GEMINI_FALLBACK_MODELS` in order (stable `*-latest` aliases) before giving up, inside the usual retry/backoff.
+- **Trade-offs:** an answer may come from a backup model. The actual model of every call is recorded in `usage.calls[].model`, so this stays visible.

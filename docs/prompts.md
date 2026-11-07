@@ -22,5 +22,6 @@ reviewed in PRs and versioned with `PROMPT_VERSION`, which is written to every r
 5. Give the model a **sanctioned way out** (`needs_clarification`, "say you don't know") instead of forcing a guess.
 
 ## Changelog
+- **sql-v4**: rule 10, "examples show patterns; the user's metric/sort/filter wins". Found by eval case E23, where the model copied an example's `ORDER BY excess_value` when asked to rank by `calculated_excess` (few-shot over-copying).
 - **sql-v3** (v2.0): structured outputs, plan/assumptions/confidence, clarification path, XML context, repair prompt with compact schema.
 - **v1**: free-text SQL prompt, JSON rerank prompt parsed by hand.

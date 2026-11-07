@@ -93,7 +93,7 @@ def main():
 
                 insert_df(cur, table, df)
                 conn.commit()
-                print(f"  ✅ inserted {len(df)} rows")
+                print(f"  inserted {len(df)} rows")
 
         print("All data loaded.")
     finally:

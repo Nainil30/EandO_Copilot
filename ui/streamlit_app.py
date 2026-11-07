@@ -92,6 +92,11 @@ with st.sidebar:
 
 
 # ------------------------------------------------------------- renderers ---
+def md_safe(text: str) -> str:
+    """Escape `$` so dollar amounts are not rendered as LaTeX math by Streamlit markdown."""
+    return (text or "").replace("$", r"\$")
+
+
 def render_chart(df: pd.DataFrame, chart: dict | None) -> None:
     if not chart or chart.get("x") not in df.columns or chart.get("y") not in df.columns:
         return
@@ -100,7 +105,9 @@ def render_chart(df: pd.DataFrame, chart: dict | None) -> None:
     if chart["type"] == "line":
         st.line_chart(data, x=chart["x"], y=chart["y"])
     else:
-        st.bar_chart(data.head(25), x=chart["x"], y=chart["y"], horizontal=len(data) > 8)
+        # keep the query's ranking (largest first) instead of Streamlit's default alphabetical sort
+        top = data.dropna().sort_values(chart["y"], ascending=False).head(25)
+        st.bar_chart(top, x=chart["x"], y=chart["y"], horizontal=len(top) > 8, sort=False)
 
 
 def render_response(r: dict, idx: int) -> None:
@@ -113,9 +120,9 @@ def render_response(r: dict, idx: int) -> None:
         status, ""
     )
     if r.get("answer"):
-        st.markdown(f"{icon} {r['answer']}")
+        st.markdown(f"{icon} {md_safe(r['answer'])}")
     for ins in r.get("key_insights") or []:
-        st.markdown(f"- {ins}")
+        st.markdown(f"- {md_safe(ins)}")
     if status == "error":
         st.warning(r.get("error"))
     if status == "sql_only":

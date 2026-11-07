@@ -16,6 +16,7 @@ from app import __version__
 from app.api.schemas import AskRequest, AskResponse, FeedbackRequest, RetrieveRequest, SQLRequest
 from app.api.security import rate_limited, require_api_key
 from app.config import get_settings
+from app.llm.budget import usage_today
 from app.observability import audit
 from app.observability.logging import configure_logging, request_id_var
 from app.pipeline.graph import run_pipeline, run_pipeline_iter
@@ -92,6 +93,7 @@ def ready():
         "kb_chunks": kb_chunks,
         "kb_version": s.kb_version,
         "llm_provider": s.llm_provider,
+        "llm_usage_today": usage_today(),
     }
 
 
@@ -222,8 +224,8 @@ def retrieve_debug(req: RetrieveRequest, _: str = Depends(rate_limited)):
 # --------------------------------------------------------------- metrics ----
 @app.get("/v1/metrics", tags=["ops"])
 def metrics(_: str = Depends(require_api_key)):
-    """Online quality + cost metrics aggregated from the audit log."""
-    return audit.metrics()
+    """Online quality + cost metrics aggregated from the audit log, plus today's API budget usage."""
+    return {**audit.metrics(), "llm_usage_today": usage_today()}
 
 
 @app.get("/v1/audit", tags=["ops"])
