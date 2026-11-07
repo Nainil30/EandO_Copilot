@@ -1,104 +1,141 @@
+"""Knowledge-base ingestion: turn schema + docs into retrievable chunks.
+
+Chunking strategy (each chosen for text-to-SQL, not generic prose):
+- table     : one chunk per table (columns + semantics + valid values + its joins).
+              Table-level chunks keep all columns of a table together, which is
+              what the generator needs; splitting tables mid-way hurts accuracy.
+- join      : one chunk per FK edge (lets BM25 hit "join X and Y" questions)
+- glossary  : markdown split on headings (business metric definitions)
+- sql_example: one chunk per approved question->SQL pair (dynamic few-shot)
+
+Ids are content hashes, so rebuilding is idempotent and diffs are cheap.
+"""
+
 from __future__ import annotations
-from typing import List, Dict, Any
+
+import re
+import time
 from pathlib import Path
 
-from app.core.schema_introspect import get_schema_snapshot
-from app.rag.vector_store import upsert_docs, stable_id
+from app.config import PROJECT_ROOT, get_settings
+from app.llm.factory import get_llm
+from app.rag import vector_store
+from app.rag.bm25 import invalidate_bm25
+from app.rag.documents import Chunk
+from app.sql.catalog import JOIN_EDGES, TABLES, edge_doc, table_doc
 
-# Resolve project root robustly:
-# app/rag/kb_builder.py -> app/rag -> app -> project_root
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DOCS_DIR = PROJECT_ROOT / "docs"
+GLOSSARY = DOCS_DIR / "business_glossary.md"
+SQL_EXAMPLES = DOCS_DIR / "sql_examples.md"
 
-def _read_file(path: Path) -> str:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing required file: {path}")
-    return path.read_text(encoding="utf-8").strip()
+_FENCE = re.compile(r"```sql\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
-def build_schema_docs() -> List[Dict[str, Any]]:
-    snap = get_schema_snapshot()
-    tables = snap["tables"]
-    fks = snap["foreign_keys"]
 
-    docs = []
-
-    for tname, cols in tables.items():
-        lines = [f"TABLE {tname}:"]
-        for c in cols:
-            lines.append(f"- {c['column']} ({c['type']}), nullable={c['nullable']}")
-        text = "\n".join(lines)
-
-        docs.append({
-            "id": stable_id("schema_table", text),
-            "text": text,
-            "metadata": {"kind": "table", "table": tname}
-        })
-
-    for fk in fks:
-        text = (
-            f"JOIN EDGE:\n"
-            f"{fk['from_table']}.{fk['from_column']} -> {fk['to_table']}.{fk['to_column']}\n"
-            f"Use this relationship for JOINs."
+def schema_chunks(live_values: dict[str, list[str]] | None = None) -> list[Chunk]:
+    chunks = []
+    for t in TABLES:
+        text = table_doc(t)
+        for key, values in (live_values or {}).items():
+            tbl, col = key.split(".")
+            if tbl == t.name and values:
+                text += f"\nSample values of {key}: " + ", ".join(f"'{v}'" for v in values) + "."
+        chunks.append(Chunk(Chunk.make_id("table", t.name, text), "table", t.name, text, "catalog", {"table": t.name}))
+    for e in JOIN_EDGES:
+        text = edge_doc(e)
+        title = f"{e.from_table} -> {e.to_table}"
+        chunks.append(
+            Chunk(
+                Chunk.make_id("join", title, text),
+                "join",
+                title,
+                text,
+                "catalog",
+                {"tables": [e.from_table, e.to_table]},
+            )
         )
-        docs.append({
-            "id": stable_id("schema_fk", text),
-            "text": text,
-            "metadata": {"kind": "fk", "from_table": fk["from_table"], "to_table": fk["to_table"]}
-        })
+    return chunks
 
-    return docs
 
-def build_business_docs() -> List[Dict[str, Any]]:
-    path = DOCS_DIR / "business_glossary.md"
-    text = _read_file(path)
-
-    return [{
-        "id": stable_id("business", text),
-        "text": text,
-        "metadata": {"kind": "business", "source": str(path)}
-    }]
-
-def build_sql_example_docs() -> List[Dict[str, Any]]:
-    path = DOCS_DIR / "sql_examples.md"
-    text = _read_file(path)
-
-    blocks = []
-    current = []
-    title = "examples"
-
+def split_markdown(text: str, level: int = 2) -> list[tuple[str, str]]:
+    """Split markdown into (heading, body) sections at the given heading level."""
+    marker = "#" * level + " "
+    sections: list[tuple[str, list[str]]] = []
     for line in text.splitlines():
-        if line.startswith("## "):
-            if current:
-                blocks.append((title, "\n".join(current).strip()))
-            title = line.replace("## ", "").strip()
-            current = [line]
-        else:
-            current.append(line)
+        if line.startswith(marker):
+            sections.append((line[len(marker) :].strip(), []))
+        elif sections:
+            sections[-1][1].append(line)
+    return [(h, "\n".join(b).strip()) for h, b in sections if "\n".join(b).strip()]
 
-    if current:
-        blocks.append((title, "\n".join(current).strip()))
 
-    docs = []
-    for t, block in blocks:
-        docs.append({
-            "id": stable_id("sql_ex", block),
-            "text": block,
-            "metadata": {"kind": "sql_example", "title": t, "source": str(path)}
-        })
-    return docs
+def glossary_chunks(path: Path = GLOSSARY) -> list[Chunk]:
+    out = []
+    for title, body in split_markdown(path.read_text(encoding="utf-8")):
+        text = f"{title}\n{body}"
+        out.append(Chunk(Chunk.make_id("glossary", title, text), "glossary", title, text, path.name))
+    return out
 
-def build_all():
-    schema_docs = build_schema_docs()
-    business_docs = build_business_docs()
-    sql_docs = build_sql_example_docs()
 
-    upsert_docs("schema", schema_docs)
-    upsert_docs("business", business_docs)
-    upsert_docs("sql_examples", sql_docs)
+def sql_example_chunks(path: Path = SQL_EXAMPLES) -> list[Chunk]:
+    out = []
+    for title, body in split_markdown(path.read_text(encoding="utf-8")):
+        m = _FENCE.search(body)
+        if not m:
+            continue
+        sql = m.group(1).strip().rstrip(";")
+        question = ""
+        qm = re.search(r"^Question:\s*(.+)$", body, re.MULTILINE)
+        if qm:
+            question = qm.group(1).strip()
+        tables = sorted(set(re.findall(r"\b((?:dim|fact)_[a-z_]+)\b", sql)))
+        text = f"Example: {title}\nQuestion: {question or title}\nTables: {', '.join(tables)}\nSQL:\n{sql}"
+        out.append(
+            Chunk(
+                Chunk.make_id("sql_example", title, text),
+                "sql_example",
+                title,
+                text,
+                path.name,
+                {"tables": tables},
+            )
+        )
+    return out
 
+
+def _live_values() -> dict[str, list[str]]:
+    """Best effort: enrich with real distinct values when the DB is reachable."""
+    try:
+        from app.sql.introspect import sample_values
+
+        return {"dim_platform.platform_name": sample_values("dim_platform", "platform_name")}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def build_all_chunks(include_live_values: bool = True) -> list[Chunk]:
+    live = _live_values() if include_live_values else {}
+    return schema_chunks(live) + glossary_chunks() + sql_example_chunks()
+
+
+def build_kb(*, reset: bool = True, include_live_values: bool = True) -> dict:
+    t0 = time.perf_counter()
+    chunks = build_all_chunks(include_live_values)
+    if reset:
+        vector_store.reset_collection()
+    embeddings = get_llm().embed([c.text for c in chunks], task="document")
+    vector_store.upsert(chunks, embeddings)
+    invalidate_bm25()
+    from app.rag.semantic_cache import clear_semantic_cache
+
+    clear_semantic_cache()
+    by_kind: dict[str, int] = {}
+    for c in chunks:
+        by_kind[c.kind] = by_kind.get(c.kind, 0) + 1
     return {
-        "schema_docs": len(schema_docs),
-        "business_docs": len(business_docs),
-        "sql_example_docs": len(sql_docs),
-        "docs_dir": str(DOCS_DIR),
+        "kb_version": get_settings().kb_version,
+        "collection": vector_store.collection_name(),
+        "chunks": len(chunks),
+        "by_kind": by_kind,
+        "embedding_dim": len(embeddings[0]) if embeddings else 0,
+        "build_ms": int((time.perf_counter() - t0) * 1000),
     }

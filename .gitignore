@@ -1,17 +1,27 @@
+# secrets
 .env
+.env.*
+!.env.example
+
+# python
 .venv/
 venv/
 __pycache__/
-*.pyc
-.DS_Store
+*.py[cod]
+*.pyd
+.pytest_cache/
+.ruff_cache/
 
-data/*.csv
-*.log
-.chroma/
-
-.vscode/
-.idea/
-
+# local state
 .chroma/
 .cache/
+.logs/
+reports/
+*.sqlite
+*.log
+data/*.csv
 
+# editors / os
+.vscode/
+.idea/
+.DS_Store

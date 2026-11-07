@@ -1,0 +1,12 @@
+.git
+.venv
+venv
+.env
+.chroma
+.cache
+.logs
+reports
+data/*.csv
+**/__pycache__
+.pytest_cache
+.ruff_cache

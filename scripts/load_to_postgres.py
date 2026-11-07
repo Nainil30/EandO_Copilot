@@ -1,14 +1,17 @@
 # scripts/load_to_postgres.py
 import os
+
 import pandas as pd
 import psycopg2
-from psycopg2.extras import execute_values
 from dotenv import load_dotenv
+from psycopg2.extras import execute_values
 
 load_dotenv()
 
-DB_URL = os.getenv("DATABASE_URL")
-assert DB_URL, "DATABASE_URL missing in .env"
+DB_URL = os.getenv("DATABASE_URL", "postgresql://copilot_user:dev_password@localhost:5432/eando_copilot")
+# psycopg2 wants a libpq URL, not the SQLAlchemy dialect form
+DB_URL = DB_URL.replace("postgresql+psycopg2://", "postgresql://")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 TABLES_IN_ORDER = [
     ("dim_platform", "data/dim_platform.csv"),
@@ -37,6 +40,7 @@ TRUNCATE TABLE
 RESTART IDENTITY CASCADE;
 """
 
+
 def clean_df_for_postgres(df: pd.DataFrame) -> pd.DataFrame:
     """
     1) Convert date-like columns to Python date objects (or None)
@@ -52,11 +56,13 @@ def clean_df_for_postgres(df: pd.DataFrame) -> pd.DataFrame:
     df = df.where(pd.notnull(df), None)
     return df
 
+
 def insert_df(cur, table: str, df: pd.DataFrame) -> None:
     cols = list(df.columns)
     values = [tuple(x) for x in df.to_numpy()]
     sql = f"INSERT INTO {table} ({','.join(cols)}) VALUES %s"
     execute_values(cur, sql, values, page_size=2000)
+
 
 def main():
     conn = psycopg2.connect(DB_URL)
@@ -68,10 +74,10 @@ def main():
 
             for table, csv_path in TABLES_IN_ORDER:
                 print(f"Loading {table} from {csv_path} ...")
-                if not os.path.exists(csv_path):
+                if not os.path.exists(os.path.join(ROOT, csv_path)):
                     raise FileNotFoundError(f"Missing file: {csv_path}. Run scripts/generate_data.py first.")
 
-                df = pd.read_csv(csv_path)
+                df = pd.read_csv(os.path.join(ROOT, csv_path))
                 df = clean_df_for_postgres(df)
 
                 insert_df(cur, table, df)
@@ -81,6 +87,7 @@ def main():
         print("All data loaded.")
     finally:
         conn.close()
+
 
 if __name__ == "__main__":
     main()

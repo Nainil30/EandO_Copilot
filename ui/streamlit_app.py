@@ -1,231 +1,241 @@
+"""E&O Copilot – chat UI.
+
+Run:  streamlit run ui/streamlit_app.py
+"""
+
 from __future__ import annotations
 
-import time
-from typing import Any, Dict, Optional
+import uuid
 
 import pandas as pd
 import streamlit as st
+from api_client import DEFAULT_API_URL, ApiClient
 
-from api_client import ApiClient
+st.set_page_config(page_title="E&O Copilot", page_icon="📦", layout="wide")
 
+EXAMPLES = [
+    "Top 10 suppliers by total excess value",
+    "Which commodities contribute most to excess value?",
+    "Show the weekly forecast trend",
+    "Largest pending scrap approvals",
+    "Which EOL parts have both LTB orders and excess?",
+    "What is consignment and why does it matter?",
+]
 
-APP_TITLE = "E&O Copilot"
-DEFAULT_API_URL = "http://127.0.0.1:8000"
+STEP_LABELS = {
+    "guard": "Input guardrails",
+    "contextualize": "Resolving follow-up context",
+    "route": "Routing intent",
+    "cache_lookup": "Semantic cache lookup",
+    "retrieve": "Hybrid retrieval (BM25 + dense, RRF)",
+    "rerank": "LLM reranking",
+    "generate_sql": "Generating SQL (structured output)",
+    "validate_execute": "Validating + executing (self-healing)",
+    "summarize": "Writing grounded answer",
+    "answer_definition": "Answering from glossary",
+}
 
-
-def _is_error(resp: Dict[str, Any]) -> bool:
-    # FastAPI typically returns {"detail": "..."} or {"detail": {...}} for errors.
-    # But note: your successful responses also include "detail" sometimes? (rare)
-    # We treat as error if detail contains typical error structure or if response lacks expected keys.
-    if not isinstance(resp, dict):
-        return True
-    if "detail" in resp:
-        return True
-    return False
-
-
-def _render_error(resp: Dict[str, Any], title: str = "Request failed") -> None:
-    st.error(title)
-    if isinstance(resp, dict) and "detail" in resp:
-        st.json(resp["detail"])
-    else:
-        st.json(resp)
-
-
-def _as_df(result: Optional[Dict[str, Any]]) -> Optional[pd.DataFrame]:
-    """
-    Backend returns:
-      result = { "columns": [...], "rows": [...], "row_count": N }
-
-    This must never throw.
-    """
-    if not result or not isinstance(result, dict):
-        return None
-    cols = result.get("columns") or []
-    rows = result.get("rows")
-    if rows is None:
-        return None
-    try:
-        return pd.DataFrame(rows, columns=cols if cols else None)
-    except Exception:
-        # Last resort fallback
-        try:
-            return pd.DataFrame(rows)
-        except Exception:
-            return None
+# ---------------------------------------------------------------- state ----
+ss = st.session_state
+ss.setdefault("session_id", uuid.uuid4().hex[:10])
+ss.setdefault("messages", [])  # list of {"role", "content" | "response"}
+ss.setdefault("api_url", DEFAULT_API_URL)
 
 
-def _divider() -> None:
-    st.markdown("---")
+def client() -> ApiClient:
+    return ApiClient(ss.api_url, api_key=ss.get("api_key") or None)
 
 
-def main() -> None:
-    st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
-    st.title(APP_TITLE)
-    st.caption("Natural language → SQL (guardrails) + RAG visibility. No gimmicks, just the workflow.")
+@st.cache_data(ttl=15, show_spinner=False)
+def readiness(api_url: str, api_key: str | None) -> dict:
+    return ApiClient(api_url, api_key=api_key).ready()
 
-    # Sidebar: backend connectivity + explicit actions
-    st.sidebar.header("Backend")
-    base_url = st.sidebar.text_input("API Base URL", value=DEFAULT_API_URL)
-    client = ApiClient(base_url=base_url)
 
-    st.sidebar.caption("If Swagger works, this should be the same base URL you used there.")
+# -------------------------------------------------------------- sidebar ----
+with st.sidebar:
+    st.title("📦 E&O Copilot")
+    st.caption("Agentic RAG text-to-SQL for Excess & Obsolete inventory")
 
-    col_a, col_b = st.sidebar.columns(2)
-    if col_a.button("Health", use_container_width=True):
-        resp = client.health()
-        if _is_error(resp):
-            _render_error(resp, "Health check failed")
-        else:
-            st.sidebar.success("Backend is reachable.")
-            st.sidebar.json(resp)
+    with st.expander("Connection", expanded=False):
+        ss.api_url = st.text_input("API URL", ss.api_url)
+        ss.api_key = st.text_input("API key (optional)", type="password")
 
-    if col_b.button("Schema", use_container_width=True):
-        resp = client.schema()
-        if _is_error(resp):
-            _render_error(resp, "Schema fetch failed")
-        else:
-            st.session_state["schema_snapshot"] = resp
-            st.sidebar.success("Schema snapshot loaded.")
-
-    _divider()
-
-    st.sidebar.header("Knowledge Base")
-    st.sidebar.caption("RAG Build: builds embeddings + vector index for docs/schema/examples used by NLQ.")
-    if st.sidebar.button("POST /rag/build", use_container_width=True):
-        resp = client.rag_build()
-        if _is_error(resp):
-            _render_error(resp, "RAG build failed")
-        else:
-            st.sidebar.success("RAG build complete.")
-            st.sidebar.json(resp)
-
-    st.sidebar.caption("RAG Debug: shows what was retrieved + what reranker kept before SQL generation.")
-    dbg_q = st.sidebar.text_area("RAG Debug question", value="Total excess value by supplier", height=80)
-    if st.sidebar.button("POST /rag/debug", use_container_width=True):
-        if not dbg_q.strip():
-            st.sidebar.warning("Enter a debug question.")
-        else:
-            resp = client.rag_debug(dbg_q.strip())
-            if _is_error(resp):
-                _render_error(resp, "RAG debug failed")
-            else:
-                st.session_state["last_rag_debug"] = resp
-                st.sidebar.success("RAG debug ok.")
-
-    # Main layout
-    _divider()
-
-    left, right = st.columns([2, 1], gap="large")
-
-    with left:
-        st.subheader("Ask a question (NLQ)")
-        st.caption("NLQ: converts a natural-language question into a safe PostgreSQL SELECT, runs it, returns results.")
-
-        q = st.text_area(
-            "Question",
-            value="Top 10 parts by excess value (calculated_excess * unit_cost) for EOL parts",
-            height=90,
+    ready = readiness(ss.api_url, ss.get("api_key") or None)
+    if isinstance(ready, dict) and "error" not in ready:
+        ok = ready.get("status") == "ok"
+        st.markdown(
+            f"{'🟢' if ok else '🟡'} **{ready.get('status')}** · DB {'✅' if ready.get('database') else '❌'} · "
+            f"KB {ready.get('kb_chunks')} chunks · `{ready.get('llm_provider')}`"
         )
+        if ready.get("kb_chunks", 0) <= 0:
+            st.warning("Knowledge base is empty – build it below.")
+    else:
+        st.error("API unreachable. Start it with `uvicorn app.api.main:app`.")
 
-        run_nlq = st.button("Run NLQ", type="primary", use_container_width=True)
+    execute = st.toggle("Execute SQL", value=True, help="Off = generate + validate SQL only")
+    stream = st.toggle("Stream pipeline steps", value=True)
 
-        if run_nlq:
-            if not q.strip():
-                st.warning("Enter a question first.")
-            else:
-                t0 = time.time()
-                resp = client.nlq(q.strip())
-                latency = time.time() - t0
-                st.session_state["last_nlq"] = resp
-                st.session_state["last_nlq_latency_s"] = latency
+    c1, c2 = st.columns(2)
+    if c1.button("New chat", use_container_width=True):
+        ss.messages, ss.session_id = [], uuid.uuid4().hex[:10]
+        st.rerun()
+    if c2.button("Build KB", use_container_width=True):
+        with st.spinner("Embedding schema, glossary and SQL examples..."):
+            st.json(client().kb_build())
 
-        nlq_resp = st.session_state.get("last_nlq")
+    st.divider()
+    st.caption("Try:")
+    for ex in EXAMPLES:
+        if st.button(ex, key=f"ex-{ex}", use_container_width=True):
+            ss.pending = ex
+    st.caption(f"session `{ss.session_id}` – follow-ups like *“only Taiwan”* use memory")
 
-        if nlq_resp:
-            if _is_error(nlq_resp):
-                _render_error(nlq_resp, "NLQ failed")
-            else:
-                st.success(f"NLQ complete in {st.session_state.get('last_nlq_latency_s', 0.0):.2f}s")
 
-                sql = nlq_resp.get("generated_sql", "")
-                if sql:
-                    st.markdown("### Generated SQL")
-                    st.code(sql, language="sql")
+# ------------------------------------------------------------- renderers ---
+def render_chart(df: pd.DataFrame, chart: dict | None) -> None:
+    if not chart or chart.get("x") not in df.columns or chart.get("y") not in df.columns:
+        return
+    data = df[[chart["x"], chart["y"]]].copy()
+    data[chart["y"]] = pd.to_numeric(data[chart["y"]], errors="coerce")
+    if chart["type"] == "line":
+        st.line_chart(data, x=chart["x"], y=chart["y"])
+    else:
+        st.bar_chart(data.head(25), x=chart["x"], y=chart["y"], horizontal=len(data) > 8)
 
-                result = nlq_resp.get("result")
-                df = _as_df(result)
 
-                st.markdown("### Result")
-                if df is None:
-                    st.info("No tabular rows returned (or result payload missing).")
-                    st.json(result if result else nlq_resp)
-                else:
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-                    if isinstance(result, dict) and "row_count" in result:
-                        st.caption(f"Row count: {result.get('row_count')}")
+def render_response(r: dict, idx: int) -> None:
+    status = r.get("status")
+    if r.get("error") and status not in ("ok",) and "detail" in r:
+        st.error(f"Request failed: {r.get('detail')}")
+        return
 
-                with st.expander("Citations + Retrieval preview", expanded=False):
-                    st.write("Citations (doc ids used as grounding):")
-                    st.json(nlq_resp.get("citations", []))
+    icon = {"ok": "✅", "blocked": "🛡️", "clarification": "❓", "out_of_scope": "🧭", "error": "⚠️", "sql_only": "📝"}.get(
+        status, ""
+    )
+    if r.get("answer"):
+        st.markdown(f"{icon} {r['answer']}")
+    for ins in r.get("key_insights") or []:
+        st.markdown(f"- {ins}")
+    if status == "error":
+        st.warning(r.get("error"))
+    if status == "sql_only":
+        st.markdown("📝 SQL generated and validated against the guardrails (execution is turned off).")
+        st.code(r.get("sql") or "", language="sql")
 
-                    st.write("Retrieval preview (top items):")
-                    st.json(nlq_resp.get("retrieval_preview", []))
+    result = r.get("result")
+    df = pd.DataFrame(result["rows"], columns=result["columns"]) if result else None
+    if df is not None and not df.empty:
+        render_chart(df, r.get("chart"))
 
-    with right:
-        st.subheader("Run SQL directly")
-        st.caption("Query: runs a SQL string with validator guardrails (safe SELECT only).")
+    meta = []
+    if r.get("confidence") is not None:
+        meta.append(f"confidence {r['confidence']:.0%}")
+    meta.append(f"{r.get('latency_ms', 0)} ms")
+    usage = r.get("usage") or {}
+    meta.append(f"{usage.get('llm_calls', 0)} LLM calls · {usage.get('input_tokens', 0) + usage.get('output_tokens', 0)} tokens")
+    if usage.get("est_cost_usd"):
+        meta.append(f"${usage['est_cost_usd']:.5f}")
+    if r.get("cache_hit"):
+        meta.append(f"⚡ semantic cache hit ({r['cache_hit']['similarity']})")
+    if r.get("attempts"):
+        meta.append(f"🔧 self-repaired x{len(r['attempts'])}")
+    st.caption(" · ".join(meta))
 
-        default_sql = "SELECT part_number, lifecycle_state, unit_cost FROM dim_part LIMIT 10"
-        sql_text = st.text_area("SQL", value=default_sql, height=160)
-
-        if st.button("Run SQL", use_container_width=True):
-            t0 = time.time()
-            resp = client.query(sql_text)
-            latency = time.time() - t0
-            st.session_state["last_query"] = resp
-            st.session_state["last_query_latency_s"] = latency
-
-        query_resp = st.session_state.get("last_query")
-        if query_resp:
-            if _is_error(query_resp):
-                _render_error(query_resp, "SQL execution failed")
-            else:
-                st.success(f"SQL complete in {st.session_state.get('last_query_latency_s', 0.0):.2f}s")
-                dfq = _as_df(query_resp)
-                if dfq is None:
-                    st.info("No rows returned.")
-                    st.json(query_resp)
-                else:
-                    st.dataframe(dfq, use_container_width=True, hide_index=True)
-                    if "row_count" in query_resp:
-                        st.caption(f"Row count: {query_resp.get('row_count')}")
-
-    _divider()
-
-    st.subheader("Debug panel")
-    st.caption("This is for you (dev) — so you can verify RAG selection and schema snapshot quickly.")
-
-    tabs = st.tabs(["RAG Debug", "Schema Snapshot", "Raw NLQ JSON"])
-
+    tabs = st.tabs(["Data", "SQL", "Sources", "Trace"])
     with tabs[0]:
-        dbg = st.session_state.get("last_rag_debug")
-        if not dbg:
-            st.info("Run /rag/debug from the sidebar to see retrieval + rerank selection.")
+        if df is None:
+            st.info("No rows (SQL-only mode, or the request did not reach execution).")
         else:
-            st.json(dbg)
-
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            if result.get("truncated"):
+                st.caption("Result truncated at the row cap.")
+            st.download_button("Download CSV", df.to_csv(index=False), f"eando_{r['request_id']}.csv", key=f"dl-{idx}")
     with tabs[1]:
-        schema = st.session_state.get("schema_snapshot")
-        if not schema:
-            st.info("Click Schema in the sidebar to load it.")
-        else:
-            st.json(schema)
-
+        if r.get("sql"):
+            st.code(r["sql"], language="sql")
+        if r.get("plan"):
+            st.markdown(f"**Plan:** {r['plan']}")
+        for a in r.get("assumptions") or []:
+            st.markdown(f"- _assumption:_ {a}")
+        for w in r.get("warnings") or []:
+            st.caption(f"⚠ {w}")
+        for a in r.get("attempts") or []:
+            with st.expander(f"Repair attempt {a['attempt'] + 1} ({a['stage']})"):
+                st.code(a["sql"], language="sql")
+                st.error(a["error"])
     with tabs[2]:
-        nlq_resp = st.session_state.get("last_nlq")
-        st.json(nlq_resp or {})
+        cites = r.get("citations") or []
+        if cites:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "kind": c["kind"],
+                            "title": c["title"],
+                            "rrf": c["score"],
+                            "dense_rank": c["signals"].get("dense_rank"),
+                            "bm25_rank": c["signals"].get("bm25_rank"),
+                            "rerank_rank": c["signals"].get("rerank_rank"),
+                            "expanded": c["signals"].get("expanded", ""),
+                        }
+                        for c in cites
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.caption("No retrieved context for this response.")
+    with tabs[3]:
+        trace = r.get("trace") or []
+        if trace:
+            st.bar_chart(pd.DataFrame([{"step": t["name"], "ms": t["ms"]} for t in trace]), x="step", y="ms")
+        st.json({"versions": r.get("versions"), "usage": usage, "retrieval": r.get("retrieval")}, expanded=False)
+
+    if r.get("request_id"):
+        f1, f2, _ = st.columns([1, 1, 10])
+        if f1.button("👍", key=f"up-{idx}"):
+            client().feedback(r["request_id"], "up")
+            st.toast("Thanks for the feedback!")
+        if f2.button("👎", key=f"down-{idx}"):
+            client().feedback(r["request_id"], "down")
+            st.toast("Logged – this becomes an eval case candidate.")
 
 
-if __name__ == "__main__":
-    main()
+# ----------------------------------------------------------------- main ----
+st.header("Ask your E&O data")
+if not ss.messages:
+    st.info(
+        "Ask in plain English. The copilot retrieves schema + business rules, writes guarded SQL, "
+        "runs it read-only, self-repairs on errors and explains the result with sources."
+    )
+
+for i, m in enumerate(ss.messages):
+    with st.chat_message(m["role"]):
+        if m["role"] == "user":
+            st.markdown(m["content"])
+        else:
+            render_response(m["response"], i)
+
+question = st.chat_input("e.g. Top 10 suppliers by excess value") or ss.pop("pending", None)
+if question:
+    ss.messages.append({"role": "user", "content": question})
+    with st.chat_message("user"):
+        st.markdown(question)
+    with st.chat_message("assistant"):
+        response: dict = {}
+        if stream:
+            with st.status("Thinking...", expanded=True) as box:
+                for ev in client().ask_stream(question, execute=execute, session_id=ss.session_id):
+                    if ev["type"] == "step":
+                        st.write(f"✓ {STEP_LABELS.get(ev['name'], ev['name'])} · {ev['ms']} ms")
+                    elif ev["type"] == "final":
+                        response = ev["response"]
+                    elif ev["type"] == "error":
+                        response = {"error": "stream_failed", "detail": ev.get("detail")}
+                box.update(label=f"Done · {response.get('status', 'error')}", state="complete", expanded=False)
+        else:
+            with st.spinner("Thinking..."):
+                response = client().ask(question, execute=execute, session_id=ss.session_id)
+        render_response(response, len(ss.messages))
+    ss.messages.append({"role": "assistant", "response": response})

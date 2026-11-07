@@ -1,271 +1,231 @@
+"""FastAPI application: versioned REST API + SSE streaming."""
+
 from __future__ import annotations
 
+import json
+import logging
 import time
-from typing import Optional
+import uuid
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
-from app.core.db import run_sql
-from app.core.schema_introspect import get_schema_snapshot
-from app.core.sql_validate import validate_sql
-from app.core.text2sql import build_prompt
-from app.core.audit import write_audit_event
+from app import __version__
+from app.api.schemas import AskRequest, AskResponse, FeedbackRequest, RetrieveRequest, SQLRequest
+from app.api.security import rate_limited, require_api_key
+from app.config import get_settings
+from app.observability import audit
+from app.observability.logging import configure_logging, request_id_var
+from app.pipeline.graph import run_pipeline, run_pipeline_iter
+from app.pipeline.memory import memory
+from app.sql import executor
+from app.sql.catalog import JOIN_EDGES, TABLES
+from app.sql.validator import validate_sql
 
-from app.llm.gemini import generate_sql
-from app.rag.kb_builder import build_all
-
-# For /rag/debug
-from app.rag.hybrid_retriever import retrieve
-from app.rag.reranker import rerank
-
-
-app = FastAPI(title="E&O Copilot API")
-
-
-class QueryRequest(BaseModel):
-    sql: str
+log = logging.getLogger("eando.api")
 
 
-class NLQRequest(BaseModel):
-    question: str
-    execute: bool = True
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    s = get_settings()
+    configure_logging(s.log_level)
+    log.info("starting E&O Copilot api provider=%s kb=%s", s.llm_provider, s.kb_version)
+    yield
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+app = FastAPI(
+    title="E&O Copilot API",
+    version=__version__,
+    description=(
+        "Agentic RAG text-to-SQL copilot for Excess & Obsolete inventory analytics. "
+        "Hybrid retrieval (BM25 + dense, RRF), LLM reranking, structured generation, "
+        "AST guardrails, self-healing SQL and grounded answer synthesis."
+    ),
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in get_settings().cors_origins.split(",")],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-@app.get("/schema")
-def schema():
-    return get_schema_snapshot()
-
-
-@app.post("/rag/build")
-def rag_build():
-    return build_all()
-
-
-@app.post("/rag/debug")
-def rag_debug(req: NLQRequest):
-    retrieval_bundle = retrieve(req.question)
-    items = retrieval_bundle.get("items", [])[:12]
-
-    rr = rerank(req.question, items, top_n=6)
-    final_items = rr.get("kept_items") if rr.get("kept_items") else items[:6]
-
-    return {
-        "question": req.question,
-        "retrieved": [{"id": i.get("id"), "source": i.get("source")} for i in items],
-        "rerank_selected_ids": rr.get("selected_ids", []),
-        "final": [{"id": i.get("id"), "source": i.get("source")} for i in final_items],
-        "reason": rr.get("reason", ""),
-        "rerank_model": rr.get("model", None),
-    }
-
-
-@app.post("/query")
-def query(req: QueryRequest):
-    ok, warnings = validate_sql(req.sql)
-    if not ok:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "unsafe_sql", "messages": warnings},
-        )
-
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+    token = request_id_var.set(rid)
+    t0 = time.perf_counter()
     try:
-        result = run_sql(req.sql)
-        result["warnings"] = warnings
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        response = await call_next(request)
+    finally:
+        request_id_var.reset(token)
+    response.headers["X-Request-ID"] = rid
+    response.headers["X-Process-Time-Ms"] = str(int((time.perf_counter() - t0) * 1000))
+    return response
 
 
-@app.post("/nlq")
-def nlq(req: NLQRequest):
-    t0 = time.time()
+# ---------------------------------------------------------------- health ----
+@app.get("/health", tags=["ops"])
+def health():
+    """Liveness probe – process is up."""
+    return {"status": "ok", "version": __version__}
 
-    # 1) Build prompt (includes retrieval + rerank selection metadata)
-    bundle = build_prompt(req.question)
 
-    prompt = bundle["prompt"]
-    citations = bundle.get("citations", [])
-    retrieval_items = bundle.get("retrieval_items", [])
-    final_items = bundle.get("final_items", [])
-    rerank_meta = bundle.get("rerank", {})
-    prompt_version = bundle.get("prompt_version", "v1")
-    kb_version = bundle.get("kb_version", "v1")
+@app.get("/ready", tags=["ops"])
+def ready():
+    """Readiness probe – dependencies reachable."""
+    from app.rag import vector_store
 
-    retrieved_ids_12 = [x.get("id") for x in retrieval_items[:12] if x.get("id")]
-    final_ids = [x.get("id") for x in final_items if x.get("id")]
+    s = get_settings()
+    try:
+        kb_chunks = vector_store.count()
+    except Exception:  # noqa: BLE001
+        kb_chunks = -1
+    db_ok = executor.ping()
+    return {
+        "status": "ok" if db_ok and kb_chunks > 0 else "degraded",
+        "database": db_ok,
+        "kb_chunks": kb_chunks,
+        "kb_version": s.kb_version,
+        "llm_provider": s.llm_provider,
+    }
 
-    # 2) Generate SQL exactly once
-    sql = generate_sql(prompt)
 
-    # 3) Validate SQL safety
-    ok, warnings = validate_sql(sql)
-    if not ok:
-        latency_ms = int((time.time() - t0) * 1000)
-        write_audit_event({
-            "type": "nlq",
-            "question": req.question,
-            "execute": req.execute,
-            "retrieved_ids": retrieved_ids_12,
-            "final_context_ids": final_ids,
-            "rerank_selected_ids": rerank_meta.get("selected_ids", []),
-            "rerank_reason": rerank_meta.get("reason", ""),
-            "rerank_model": rerank_meta.get("model", None),
-            "generated_sql": sql,
-            "blocked": True,
-            "warnings": warnings,
-            "latency_ms": latency_ms,
-            "prompt_version": prompt_version,
-            "kb_version": kb_version,
-        })
+# ------------------------------------------------------------------- ask ----
+@app.post("/v1/ask", response_model=AskResponse, tags=["copilot"])
+def ask(req: AskRequest, _: str = Depends(rate_limited)):
+    """Natural-language question -> grounded SQL -> results -> business answer."""
+    return run_pipeline(req.question, execute=req.execute, session_id=req.session_id)
 
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "llm_generated_unsafe_sql",
-                "generated_sql": sql,
-                "messages": warnings,
-            },
-        )
 
-    # 4) Execute (optional)
-    result = None
-    row_count: Optional[int] = None
+@app.post("/v1/ask/stream", tags=["copilot"])
+def ask_stream(req: AskRequest, _: str = Depends(rate_limited)):
+    """Same as /v1/ask but streams each pipeline step as Server-Sent Events."""
 
-    if req.execute:
-        try:
-            result = run_sql(sql)
-            row_count = result.get("row_count")
-        except Exception as e:
-            # Optional repair attempt: only if you created app/core/sql_repair.py
-            msg = str(e)
+    def gen():
+        for ev in run_pipeline_iter(req.question, execute=req.execute, session_id=req.session_id):
+            yield f"event: {ev['type']}\ndata: {json.dumps(ev, default=str)}\n\n"
 
-            try:
-                from app.core.sql_repair import can_repair, repair_sql  # optional file
-                if can_repair(msg):
-                    repaired = repair_sql(sql=sql, error_message=msg, model="gemini-1.5-flash")
-                    if repaired:
-                        ok2, warnings2 = validate_sql(repaired)
-                        if ok2:
-                            try:
-                                result2 = run_sql(repaired)
-                                latency_ms = int((time.time() - t0) * 1000)
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
-                                write_audit_event({
-                                    "type": "nlq",
-                                    "question": req.question,
-                                    "execute": req.execute,
-                                    "retrieved_ids": retrieved_ids_12,
-                                    "final_context_ids": final_ids,
-                                    "rerank_selected_ids": rerank_meta.get("selected_ids", []),
-                                    "rerank_reason": rerank_meta.get("reason", ""),
-                                    "rerank_model": rerank_meta.get("model", None),
-                                    "generated_sql": repaired,
-                                    "repaired_from": sql,
-                                    "blocked": False,
-                                    "warnings": warnings2,
-                                    "row_count": result2.get("row_count"),
-                                    "latency_ms": latency_ms,
-                                    "prompt_version": prompt_version,
-                                    "kb_version": kb_version,
-                                    "repair_used": True,
-                                    "repair_error": msg,
-                                })
 
-                                return {
-                                    "question": req.question,
-                                    "generated_sql": repaired,
-                                    "repaired_from": sql,
-                                    "repair_reason": "auto_fix_after_execution_error",
-                                    "warnings": warnings2,
-                                    "citations": citations,
-                                    "result": result2,
-                                    "retrieval_preview": [
-                                        {
-                                            "id": x.get("id"),
-                                            "kind": (x.get("metadata") or {}).get("kind"),
-                                            "title": (x.get("metadata") or {}).get("title", ""),
-                                            "source": x.get("source"),
-                                        }
-                                        for x in retrieval_items[:8]
-                                    ],
-                                    "rerank": rerank_meta,
-                                    "prompt_version": prompt_version,
-                                    "kb_version": kb_version,
-                                }
-                            except Exception as e2:
-                                msg = str(e2)
-            except ModuleNotFoundError:
-                # sql_repair.py doesn't exist; that's fine
-                pass
+@app.delete("/v1/sessions/{session_id}", tags=["copilot"])
+def clear_session(session_id: str, _: str = Depends(require_api_key)):
+    memory.clear(session_id)
+    return {"cleared": session_id}
 
-            # Audit execution failure
-            latency_ms = int((time.time() - t0) * 1000)
-            write_audit_event({
-                "type": "nlq",
-                "question": req.question,
-                "execute": req.execute,
-                "retrieved_ids": retrieved_ids_12,
-                "final_context_ids": final_ids,
-                "rerank_selected_ids": rerank_meta.get("selected_ids", []),
-                "rerank_reason": rerank_meta.get("reason", ""),
-                "rerank_model": rerank_meta.get("model", None),
-                "generated_sql": sql,
-                "blocked": False,
-                "execution_failed": True,
-                "error": msg,
-                "latency_ms": latency_ms,
-                "prompt_version": prompt_version,
-                "kb_version": kb_version,
-            })
 
-            raise HTTPException(status_code=500, detail={
-                "error": "execution_failed",
-                "generated_sql": sql,
-                "message": msg,
-            })
+@app.post("/v1/feedback", tags=["copilot"])
+def feedback(req: FeedbackRequest, _: str = Depends(require_api_key)):
+    """Thumbs up/down (+ optional corrected SQL) – the raw material for new eval cases."""
+    audit.write_feedback(req.model_dump())
+    return {"recorded": True}
 
-    # 5) Success audit log
-    latency_ms = int((time.time() - t0) * 1000)
-    write_audit_event({
-        "type": "nlq",
-        "question": req.question,
-        "execute": req.execute,
-        "retrieved_ids": retrieved_ids_12,
-        "final_context_ids": final_ids,
-        "rerank_selected_ids": rerank_meta.get("selected_ids", []),
-        "rerank_reason": rerank_meta.get("reason", ""),
-        "rerank_model": rerank_meta.get("model", None),
-        "generated_sql": sql,
-        "blocked": False,
-        "warnings": warnings,
-        "row_count": row_count,
-        "latency_ms": latency_ms,
-        "prompt_version": prompt_version,
-        "kb_version": kb_version,
-    })
 
+# ------------------------------------------------------------------- sql ----
+@app.post("/v1/sql", tags=["sql"])
+def run_sql(req: SQLRequest, _: str = Depends(rate_limited)):
+    """Run analyst-written SQL through the same guardrails as generated SQL."""
+    s = get_settings()
+    v = validate_sql(req.sql, default_limit=s.sql_default_limit, max_rows=s.sql_max_rows)
+    if not v.ok:
+        raise HTTPException(400, {"error": "unsafe_sql", "messages": v.errors})
+    try:
+        result = executor.run_sql(v.sql)
+    except executor.SQLExecutionError as e:
+        raise HTTPException(422, {"error": "execution_failed", "message": str(e), "sql": v.sql}) from e
+    return {"sql": v.sql, "warnings": v.warnings, "result": result}
+
+
+@app.post("/v1/sql/validate", tags=["sql"])
+def validate(req: SQLRequest, _: str = Depends(require_api_key)):
+    s = get_settings()
+    v = validate_sql(req.sql, default_limit=s.sql_default_limit, max_rows=s.sql_max_rows)
+    return {"ok": v.ok, "sql": v.sql, "errors": v.errors, "warnings": v.warnings, "tables": v.tables}
+
+
+@app.get("/v1/schema", tags=["sql"])
+def schema():
+    """Semantic layer: tables, column descriptions, valid values and join graph."""
+    return {
+        "tables": [
+            {
+                "name": t.name,
+                "description": t.description,
+                "grain": t.grain,
+                "columns": [
+                    {"name": c.name, "type": c.type, "description": c.description, "values": list(c.values)} for c in t.columns
+                ],
+            }
+            for t in TABLES
+        ],
+        "joins": [e.__dict__ for e in JOIN_EDGES],
+    }
+
+
+# -------------------------------------------------------------------- kb ----
+@app.post("/v1/kb/build", tags=["knowledge-base"])
+def kb_build(_: str = Depends(require_api_key)):
+    """(Re)index schema chunks, glossary and SQL examples into the vector store."""
+    from app.rag.kb_builder import build_kb
+
+    return build_kb()
+
+
+@app.get("/v1/kb/stats", tags=["knowledge-base"])
+def kb_stats():
+    from app.rag import vector_store
+
+    chunks = vector_store.all_chunks()
+    by_kind: dict[str, int] = {}
+    for c in chunks:
+        by_kind[c.kind] = by_kind.get(c.kind, 0) + 1
+    return {"collection": vector_store.collection_name(), "chunks": len(chunks), "by_kind": by_kind}
+
+
+@app.get("/v1/kb/chunks", tags=["knowledge-base"])
+def kb_chunks(kind: str | None = None):
+    from app.rag import vector_store
+
+    return [
+        {"id": c.id, "kind": c.kind, "title": c.title, "source": c.source, "text": c.text}
+        for c in vector_store.all_chunks()
+        if kind is None or c.kind == kind
+    ]
+
+
+@app.post("/v1/retrieve/debug", tags=["knowledge-base"])
+def retrieve_debug(req: RetrieveRequest, _: str = Depends(rate_limited)):
+    """Inspect dense vs BM25 vs fused vs reranked results for a question."""
+    from app.rag.reranker import rerank
+    from app.rag.retriever import retrieve
+
+    s = get_settings()
+    r = retrieve(req.question)
+    fused = [c for c in r.chunks if "expanded" not in c.signals]
+    kept, meta = rerank(req.question, fused, s.context_top_n) if req.rerank else (fused[: s.context_top_n], {"used": False})
     return {
         "question": req.question,
-        "generated_sql": sql,
-        "warnings": warnings,
-        "citations": citations,
-        "result": result,
-        "retrieval_preview": [
-            {
-                "id": x.get("id"),
-                "kind": (x.get("metadata") or {}).get("kind"),
-                "title": (x.get("metadata") or {}).get("title", ""),
-                "source": x.get("source"),
-            }
-            for x in retrieval_items[:8]
-        ],
-        "rerank": rerank_meta,
-        "prompt_version": prompt_version,
-        "kb_version": kb_version,
+        "dense": r.dense_ids,
+        "bm25": r.sparse_ids,
+        "fused": [c.public() for c in fused],
+        "graph_expanded": r.expanded_ids,
+        "reranked": [c.id for c in kept],
+        "rerank": meta,
     }
+
+
+# --------------------------------------------------------------- metrics ----
+@app.get("/v1/metrics", tags=["ops"])
+def metrics(_: str = Depends(require_api_key)):
+    """Online quality + cost metrics aggregated from the audit log."""
+    return audit.metrics()
+
+
+@app.get("/v1/audit", tags=["ops"])
+def audit_tail(limit: int = 50, _: str = Depends(require_api_key)):
+    return list(reversed(audit.read_jsonl("audit.jsonl", min(limit, 500))))

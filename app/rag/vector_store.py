@@ -1,80 +1,76 @@
-import os
-import hashlib
-from typing import List, Dict, Any
-from dotenv import load_dotenv
+"""Thin wrapper around a persistent ChromaDB collection.
 
-import chromadb
-from chromadb.config import Settings
+One collection per KB version (`eando_kb_<version>`) using cosine distance.
+Chunk kind lives in metadata so we can filter (`where={"kind": ...}`) instead
+of maintaining several collections. Versioned collections make re-indexing a
+blue/green operation: build v3 while v2 keeps serving, then flip KB_VERSION.
+"""
 
-from google import genai
-from google.genai import types
+from __future__ import annotations
 
-load_dotenv()
+from functools import lru_cache
+from typing import Any
 
-CHROMA_DIR = os.getenv("CHROMA_DIR", ".chroma")
-KB_VERSION = os.getenv("KB_VERSION", "v1")
+from app.config import get_settings
+from app.rag.documents import Chunk
 
-def _client() -> chromadb.PersistentClient:
-    return chromadb.PersistentClient(
-        path=CHROMA_DIR,
-        settings=Settings(anonymized_telemetry=False)
-    )
 
-def _genai_client() -> genai.Client:
-    key = os.getenv("GEMINI_API_KEY")
-    if not key:
-        raise RuntimeError("GEMINI_API_KEY missing in .env")
-    return genai.Client(api_key=key)
+@lru_cache(maxsize=1)
+def _client():
+    import chromadb
+    from chromadb.config import Settings as ChromaSettings
 
-def embed_texts(texts: List[str], *, title: str = "eando-kb") -> List[List[float]]:
-    """
-    Batch embeddings via Gemini Embedding model.
-    Uses task_type=RETRIEVAL_DOCUMENT for better RAG embeddings.
-    """
-    if not texts:
-        return []
+    return chromadb.PersistentClient(path=get_settings().chroma_dir, settings=ChromaSettings(anonymized_telemetry=False))
 
-    client = _genai_client()
 
-    # Correct model for Gemini embeddings (Developer API / v1beta)
-    model = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
+def collection_name(version: str | None = None) -> str:
+    return f"eando_kb_{version or get_settings().kb_version}"
 
-    # One call for many chunks (faster + cheaper)
-    resp = client.models.embed_content(
-        model=model,
-        contents=texts,
-        config=types.EmbedContentConfig(
-            task_type="RETRIEVAL_DOCUMENT",
-            title=title
-        )
-    )
 
-    return [e.values for e in resp.embeddings]
+def get_collection(version: str | None = None):
+    return _client().get_or_create_collection(name=collection_name(version), metadata={"hnsw:space": "cosine"})
 
-def stable_id(prefix: str, content: str) -> str:
-    h = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
-    return f"{prefix}_{h}"
 
-def get_collection(name: str):
-    c = _client()
-    return c.get_or_create_collection(name=f"{name}_{KB_VERSION}")
+def reset_collection(version: str | None = None) -> None:
+    try:
+        _client().delete_collection(collection_name(version))
+    except Exception:  # noqa: BLE001 – collection may not exist yet
+        pass
 
-def upsert_docs(collection_name: str, docs: List[Dict[str, Any]]):
-    """
-    docs: [{id, text, metadata}]
-    """
-    col = get_collection(collection_name)
 
-    texts = [d["text"] for d in docs]
-    ids = [d["id"] for d in docs]
-    metas = [d.get("metadata", {}) for d in docs]
-
-    embs = embed_texts(texts, title=f"{collection_name}_{KB_VERSION}")
-
+def upsert(chunks: list[Chunk], embeddings: list[list[float]]) -> None:
+    col = get_collection()
     col.upsert(
-        ids=ids,
-        documents=texts,
-        metadatas=metas,
-        embeddings=embs
+        ids=[c.id for c in chunks],
+        documents=[c.text for c in chunks],
+        metadatas=[c.chroma_metadata() for c in chunks],
+        embeddings=embeddings,
     )
 
+
+def query(embedding: list[float], k: int, where: dict[str, Any] | None = None) -> list[Chunk]:
+    col = get_collection()
+    n = col.count()
+    if n == 0:
+        return []
+    res = col.query(
+        query_embeddings=[embedding],
+        n_results=min(k, n),
+        where=where,
+        include=["documents", "metadatas", "distances"],
+    )
+    out = []
+    for cid, doc, meta, dist in zip(res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]):
+        ch = Chunk.from_store(cid, doc, meta)
+        ch.signals["dense_similarity"] = round(1.0 - float(dist), 4)
+        out.append(ch)
+    return out
+
+
+def all_chunks() -> list[Chunk]:
+    data = get_collection().get(include=["documents", "metadatas"])
+    return [Chunk.from_store(i, d, m) for i, d, m in zip(data["ids"], data["documents"], data["metadatas"])]
+
+
+def count() -> int:
+    return get_collection().count()

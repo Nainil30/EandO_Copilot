@@ -1,67 +1,43 @@
-# app/rag/reranker.py
+"""Second-stage reranking (LLM-as-reranker with structured output).
+
+Retrieval optimises recall (12 candidates); reranking optimises precision
+(keep ~6) so the generator sees less noise and fewer distracting tables.
+Fails open: if the reranker errors or returns junk ids, we keep fused order –
+a reranker outage must never take down the main path.
+"""
+
 from __future__ import annotations
-import json
-import os
-from typing import Dict, Any, List
 
-from app.llm.gemini_client import generate_text
+import logging
 
-RERANK_PROMPT_TEMPLATE = """
-You are reranking retrieval results for a text-to-SQL system.
+from app.llm.factory import get_llm
+from app.pipeline.outputs import RerankResult
+from app.pipeline.prompts import RERANK_SYSTEM, RERANK_USER
+from app.rag.documents import Chunk
 
-Return JSON only:
-{{
-  "selected_ids": ["id1","id2",...],
-  "reason": "one short sentence"
-}}
+log = logging.getLogger(__name__)
 
-Rules:
-- Select the most useful chunks to write correct SQL.
-- Prefer schema chunks needed for joins + keys.
-- Prefer SQL examples if they match the join/aggregation pattern.
-- Select exactly {top_n} ids (or fewer if not enough exist).
-- JSON ONLY. No markdown.
 
-Question:
-{question}
-
-Chunks (JSON array of objects with id, source, text):
-{chunks_json}
-""".strip()
-
-def rerank(question: str, items: List[Dict[str, Any]], top_n: int = 6) -> Dict[str, Any]:
-    model = os.getenv("GEMINI_RERANK_MODEL", "gemini-2.5-flash-lite")
-
-    # Keep rerank prompt small: truncate long docs
-    slim = []
-    for it in items:
-        text = (it.get("text") or "")[:900]
-        slim.append({"id": it.get("id"), "source": it.get("source"), "text": text})
-
-    prompt = RERANK_PROMPT_TEMPLATE.format(
-        question=question,
-        top_n=top_n,
-        chunks_json=json.dumps(slim, ensure_ascii=False),
+def format_candidates(chunks: list[Chunk], max_chars: int = 700) -> str:
+    return "\n".join(
+        f'<candidate id="{c.id}" kind="{c.kind}" title="{c.title}">\n{c.text[:max_chars]}\n</candidate>' for c in chunks
     )
 
-    raw = generate_text(prompt=prompt, model=model)
 
-
-    # Defensive JSON parse
+def rerank(question: str, chunks: list[Chunk], top_n: int) -> tuple[list[Chunk], dict]:
+    if len(chunks) <= top_n:
+        return chunks, {"used": False, "reason": "fewer candidates than top_n"}
+    prompt = RERANK_USER.format(question=question, candidates=format_candidates(chunks), top_n=top_n)
     try:
-        data = json.loads(raw)
-    except Exception:
-        data = {"selected_ids": [], "reason": "rerank_parse_failed", "raw": raw}
+        res = get_llm().generate_structured(prompt, RerankResult, task="rerank", system=RERANK_SYSTEM, tier="fast")
+    except Exception as e:  # noqa: BLE001
+        log.warning("rerank failed, falling back to fused order: %s", e)
+        return chunks[:top_n], {"used": False, "reason": f"rerank_error: {e}"}
 
-    selected = data.get("selected_ids") or []
-    selected_set = set(selected)
-
-    kept = [it for it in items if it.get("id") in selected_set]
-
-    return {
-        "model": model,
-        "reason": data.get("reason", ""),
-        "selected_ids": selected,
-        "kept_items": kept,
-        "raw": raw if "raw" in data else None,
-    }
+    by_id = {c.id: c for c in chunks}
+    kept = [by_id[i] for i in dict.fromkeys(res.selected_ids) if i in by_id][:top_n]
+    if not kept:
+        return chunks[:top_n], {"used": False, "reason": "rerank returned no valid ids"}
+    for rank, c in enumerate(kept, 1):
+        c.signals["rerank_rank"] = rank
+    return kept, {"used": True, "reason": res.reason, "selected_ids": [c.id for c in kept]}
