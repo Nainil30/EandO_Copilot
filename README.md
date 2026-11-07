@@ -58,6 +58,15 @@ synthetic (no company data), but the schema, metrics and workflows are realistic
 | "What does EOSS mean?" | Routed to the glossary (no SQL), answered with citations |
 | "Delete all inventory rows" | Blocked before any LLM call. Even if it slipped through, the AST validator and a read-only DB role would stop it |
 
+### How it works, for a non-technical manager
+1. Start the database (Docker), the API and the Streamlit UI (see [Quickstart](#5-quickstart)).
+2. Ask a question in plain English, e.g. *"Top 10 parts by excess value for EOL parts"*.
+3. The copilot finds the relevant schema, business definitions and approved query patterns, writes one safe
+   SQL query, checks it, and runs it read-only.
+4. You get a short answer, a chart and the results table, plus the evidence: the SQL itself and which
+   documents shaped it (the **Sources** tab).
+5. Ask a follow-up like *"only Taiwan"* and it remembers the context. Click 👍/👎 to help it improve.
+
 ---
 
 ## 2. What it demonstrates
