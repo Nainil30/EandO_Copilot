@@ -1,6 +1,7 @@
 # scripts/load_to_postgres.py
 import os
 
+import numpy as np
 import pandas as pd
 import psycopg2
 from dotenv import load_dotenv
@@ -41,25 +42,35 @@ RESTART IDENTITY CASCADE;
 """
 
 
-def clean_df_for_postgres(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    1) Convert date-like columns to Python date objects (or None)
-    2) Replace pandas NaN/NaT with None so psycopg2 inserts NULL
-    """
-    # Convert any column with 'date' or 'week' in the name to a python date
-    for c in df.columns:
-        if "date" in c.lower() or "week" in c.lower():
-            s = pd.to_datetime(df[c], errors="coerce")
-            df[c] = s.dt.date  # invalid/missing -> NaT -> becomes null-ish
+DATE_HINTS = ("date", "week", "effective_")
 
-    # Replace NaN/NaT across the dataframe with None (so DB gets NULL)
-    df = df.where(pd.notnull(df), None)
+
+def clean_df_for_postgres(df: pd.DataFrame) -> pd.DataFrame:
+    """Parse date-like columns (by name) so they load as DATE, not text/float."""
+    for c in df.columns:
+        if any(h in c.lower() for h in DATE_HINTS):
+            df[c] = pd.to_datetime(df[c], errors="coerce")
     return df
+
+
+def to_db_value(v):
+    """Convert a pandas/numpy cell to a plain Python value psycopg2 can adapt.
+
+    Done per value (not with df.where) because NaN/NaT handling differs across
+    pandas versions: pandas 3 keeps NaN in float columns.
+    """
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return None
+    if isinstance(v, pd.Timestamp):
+        return v.date()
+    if isinstance(v, np.generic):
+        return v.item()
+    return v
 
 
 def insert_df(cur, table: str, df: pd.DataFrame) -> None:
     cols = list(df.columns)
-    values = [tuple(x) for x in df.to_numpy()]
+    values = [tuple(to_db_value(v) for v in row) for row in df.itertuples(index=False, name=None)]
     sql = f"INSERT INTO {table} ({','.join(cols)}) VALUES %s"
     execute_values(cur, sql, values, page_size=2000)
 
