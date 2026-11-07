@@ -1,17 +1,31 @@
-fastapi>=0.109.0
-uvicorn>=0.27.0
-streamlit>=1.29.0
+# --- API -------------------------------------------------------------
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.8
+pydantic-settings>=2.4
+httpx>=0.27
 
+# --- data / SQL --------------------------------------------------------
+sqlalchemy>=2.0
 psycopg2-binary>=2.9.9
-python-dotenv>=1.0.0
+sqlglot>=25.0
+pandas>=2.1
+numpy>=1.26,<2.0  # chromadb 0.4/0.5 still pins numpy<2 on some platforms
+faker>=20.1
 
-pandas>=2.1.4
-numpy>=1.26.2
-faker>=20.1.0
+# --- RAG ---------------------------------------------------------------
+chromadb>=0.4.24
+rank-bm25>=0.2.2
+diskcache>=5.6
 
-chromadb>=0.4.22
-sqlglot>=20.0.0
-pydantic>=2.5.3
+# --- LLM providers -----------------------------------------------------
+google-genai>=1.0
 
-google-genai>=1.0.0
-requests>=2.31.0
+# --- agent interop -----------------------------------------------------
+mcp>=1.2
+
+# --- UI ------------------------------------------------------------------
+streamlit>=1.40
+
+# --- misc ---------------------------------------------------------------
+python-dotenv>=1.0

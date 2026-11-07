@@ -1,265 +1,69 @@
-# Business Glossary: E&O Copilot
+# Business Glossary – E&O Copilot
 
-## Excess inventory
-Excess is inventory that is not expected to be consumed by remaining demand.
+Business definitions used by the copilot. Each `##` section becomes one retrievable chunk,
+so keep every section self-contained.
 
-Default horizon:
-- Remaining forecast horizon = next 12 weeks unless user specifies a different horizon.
+## Excess and Obsolete (E&O) inventory
+E&O inventory is stock that is not expected to be consumed by remaining demand (excess) or
+that can no longer be used because the part or platform reached end of life (obsolete).
+E&O drives inventory write-offs, so supply-chain teams track it weekly.
 
 ## Excess quantity
-For a part at a supplier/location:
-excess_qty = on_hand_qty - SUM(forecasted_units over horizon)
-
-If excess_qty <= 0: no excess.
+Excess quantity is on-hand inventory minus remaining forecast demand over the horizon.
+Formula: excess_qty = on_hand - total_forecast_remaining.
+In the warehouse it is precomputed as fact_excess_calculation.calculated_excess.
+If excess_qty <= 0 the part has no excess.
 
 ## Excess value
-excess_value = excess_qty * unit_cost
-
-## Scrap recommendation
-Default recommendation:
-- scrap_recommended = floor(excess_qty * 0.70)
-- hold_recommended = excess_qty - scrap_recommended
-
-## Lifecycle
-- Active: currently shipping/servicing
-- EOL: end-of-life initiated (final buys may exist)
-- EOSS: end of support services (may still have service demand until EOSS)
-
-## LTB (Last Time Buy)
-LTB orders are final buys during EOL/EOSS transition.
-
-
-1.3 Install Python packages
-
-From repo root:
-
-pip install -r requirements.txt
-pip freeze > requirements.lock.txt
-
-
-Note:
-
-If install errors happen, check Python version and pinned versions.
-
-If Chroma fails with NumPy 2.x issues, pin NumPy < 2.
-
-Phase 2 — PostgreSQL in Docker (Local)
-2.1 Start Docker Desktop
-
-Open Docker Desktop
-
-Wait until it shows “Docker is running”
-
-2.2 Start Postgres container using docker compose
-
-From repo root (IMPORTANT):
-
-docker compose up -d
-docker ps
-
-
-Expected:
-
-Container eando_postgres shows “healthy”
-
-Port mapping: 5432:5432
-
-2.3 Confirm schema exists
-docker exec -it eando_postgres psql -U copilot_user -d eando_copilot -c "\dt"
-
-
-Expected:
-
-9 tables listed:
-
-dim_part, dim_platform, dim_supplier
-
-fact_bom, fact_inventory, fact_forecast, fact_ltb_orders
-
-fact_excess_calculation, fact_scrap_approval
-
-2.4 Stop Postgres cleanly
-docker compose down
-
-
-To wipe data (ONLY if you want a fresh DB):
-
-docker compose down -v
-
-Phase 3 — Fake Data + Load into Postgres
-3.1 Generate fake CSVs
-
-From repo root:
-
-python scripts\generate_data.py
-
-
-Expected:
-
-CSV files appear in data/
-
-Example: data\dim_part.csv, data\fact_inventory.csv, etc.
-
-3.2 Load CSVs into Postgres
-
-Before loading:
-
-Ensure docker is up + healthy
-
-Ensure venv active
-
-Run:
-
-python scripts\load_to_postgres.py
-
-
-Expected:
-
-“Truncating tables…”
-
-Inserts happen for each table
-
-No duplicate key errors (part_number uniqueness handled)
-
-No NaT datetime errors (NaT converted to None/NULL in loader)
-
-3.3 Verify row counts quickly
-docker exec -it eando_postgres psql -U copilot_user -d eando_copilot -c "select count(*) from dim_part;"
-docker exec -it eando_postgres psql -U copilot_user -d eando_copilot -c "select count(*) from fact_excess_calculation;"
-
-Phase 4 — FastAPI + Swagger
-4.1 Run API
-
-From repo root with venv active:
-
-python -m uvicorn app.api.main:app --reload --port 8000
-
-
-Expected:
-
-Server running at: http://127.0.0.1:8000
-
-Swagger at: http://127.0.0.1:8000/docs
-
-4.2 Stop API
-
-Press Ctrl + C in the terminal running uvicorn.
-
-Note:
-
-You may see KeyboardInterrupt / CancelledError logs. This is normal shutdown.
-
-Phase 5 — Text-to-SQL Core
-Implemented endpoints
-
-GET /health
-
-GET /schema
-
-POST /query (direct SQL)
-
-POST /nlq (natural language → SQL → validate → execute)
-
-POST /rag/build (build KB into Chroma)
-
-POST /rag/debug (inspect retrieval + rerank selection)
-
-Behavior
-
-/nlq:
-
-Retrieve context (schema + business + examples)
-
-(Optional) rerank
-
-Generate SQL via Gemini
-
-Validate SQL is safe (SELECT-only)
-
-Execute SQL and return rows
-
-Phase 6 — RAG (Hybrid) + Rerank
-What exists
-
-Vector store using Chroma
-
-Hybrid retrieval:
-
-Vector similarity search
-
-BM25 fallback/boost
-
-Merge + heuristic sort
-
-RAG build collects:
-
-schema docs (tables, columns, joins)
-
-business glossary / definitions
-
-curated SQL examples
-
-Reranker:
-
-Retrieve top ~12 chunks
-
-Gemini reranks to best ~6 to reduce noise and improve join correctness
-
-Known fixes already applied
-
-Postgres column mismatch fixed:
-
-Correct column is dim_part.lifecycle_state (not lifecycle)
-
-Chroma include list fixed:
-
-Do not request ids in include; Chroma returns ids by default
-
-Phase 7 — Company-grade (Planned next)
-
-Audit logs for each NLQ call:
-
-question, retrieval ids, rerank ids, sql, rowcount, latency, model ids, kb version
-
-Eval harness:
-
-30–50 NLQ questions + expected patterns
-
-pass rate, unsafe SQL blocked rate, latency
-
-Later: Streamlit UI + “trust panel” showing SQL + citations + execution metadata
-
-Standard run sequence (daily)
-
-Activate venv:
-
-cd C:\Users\naini\eando-copilot
-.\.venv\Scripts\Activate.ps1
-
-
-Start DB:
-
-docker compose up -d
-docker ps
-
-
-Start API:
-
-python -m uvicorn app.api.main:app --reload --port 8000
-
-
-Build KB (once per KB change) in Swagger:
-
-POST /rag/build
-
-Test NLQ:
-
-POST /nlq
-
-Standard shutdown sequence (daily)
-
-Stop API: Ctrl+C in uvicorn terminal
-
-Stop DB:
-
-docker compose down
+Excess value (excess $, excess dollars, E&O exposure) is the dollar value of excess units.
+Formula: excess_value = fact_excess_calculation.calculated_excess * dim_part.unit_cost.
+Join fact_excess_calculation to dim_part on part_id. Aggregate with SUM for rollups by
+supplier, commodity, country or lifecycle_state.
+
+## Forecast horizon
+The default demand horizon is the next 12 weeks (fact_forecast.forecast_week between
+CURRENT_DATE and CURRENT_DATE + INTERVAL '12 weeks') unless the user specifies another window.
+
+## Scrap and hold recommendation
+The excess engine splits excess into scrap and hold:
+scrap_recommended = floor(calculated_excess * 0.70) and
+hold_recommended = calculated_excess - scrap_recommended.
+Scrap value = scrap_recommended * unit_cost. Hold stock is kept as a buffer for service demand.
+
+## Scrap approval workflow
+Scrap write-offs need approval (fact_scrap_approval). status is 'Approved', 'Pending' or
+'Rejected'. approval_level 1-3 reflects the value tier (higher level = larger write-off,
+more senior approver). Pending approvals with high scrap_value are the main risk backlog.
+
+## Lifecycle states
+dim_part.lifecycle_state values:
+- Active: currently shipping and supported.
+- EOL (End of Life): end-of-life announced; last-time buys may be placed.
+- EOSS (End of Service Support): only service demand remains until eoss_date.
+- Discontinued: no further demand expected; remaining stock is obsolete.
+"At-risk" parts usually means lifecycle_state IN ('EOL', 'EOSS', 'Discontinued').
+
+## Last Time Buy (LTB)
+A Last Time Buy is the final purchase order placed with a supplier before a part is
+discontinued (fact_ltb_orders). Over-sized LTBs are a leading cause of future excess.
+order_reason is one of 'EOL Final Buy', 'Service Buffer', 'Safety Stock'.
+
+## Consignment
+Consigned inventory (fact_inventory.consigned_qty) is owned by the supplier until consumed,
+so it does not count as company-owned excess. dim_supplier.consignment_partner marks suppliers
+that support consignment; fact_excess_calculation.consignment_eligible marks excess that could be
+moved back to supplier consignment to reduce exposure.
+
+## Shared parts and BOM
+A Bill of Materials (fact_bom) lists the parts used per platform and qty_per_unit.
+is_shared = true means the part is used on multiple platforms, which lowers obsolescence risk
+because demand from one platform can absorb excess from another.
+
+## Supplier tiers and lead time
+supplier_tier is 'Tier 1', 'Tier 2' or 'CM' (contract manufacturer). Long lead_time_days
+increases the safety stock needed and therefore excess risk when demand drops.
+
+## Inventory positions
+fact_inventory has three quantities per part, supplier and location:
+on_hand_qty (owned, physically present), consigned_qty (supplier-owned) and in_transit_qty
+(shipped, not received). Total pipeline = on_hand_qty + in_transit_qty.

@@ -13,7 +13,7 @@ np.random.seed(42)
 random.seed(42)
 fake = Faker()
 
-OUT_DIR = "data"
+OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 NUM_PARTS = 500
@@ -25,12 +25,12 @@ def generate_platforms():
     platforms = [
         {"platform_name": "StorageX 1000", "business_unit": "Storage", "launch_date": "2020-05-01", "eol_date": "2024-12-31"},
         {"platform_name": "StorageX 3000", "business_unit": "Storage", "launch_date": "2021-03-15", "eol_date": None},
-        {"platform_name": "ServerY R750",  "business_unit": "Servers", "launch_date": "2021-02-10", "eol_date": "2025-06-30"},
-        {"platform_name": "ServerY R760",  "business_unit": "Servers", "launch_date": "2023-01-20", "eol_date": None},
-        {"platform_name": "VaultZ ME5",    "business_unit": "Storage", "launch_date": "2019-08-01", "eol_date": "2024-03-31"},
-        {"platform_name": "ServerY R650",  "business_unit": "Servers", "launch_date": "2020-11-05", "eol_date": "2024-11-30"},
-        {"platform_name": "ScaleF 900",    "business_unit": "Storage", "launch_date": "2022-06-01", "eol_date": None},
-        {"platform_name": "ServerY XE9",   "business_unit": "Servers", "launch_date": "2023-09-01", "eol_date": None},
+        {"platform_name": "ServerY R750", "business_unit": "Servers", "launch_date": "2021-02-10", "eol_date": "2025-06-30"},
+        {"platform_name": "ServerY R760", "business_unit": "Servers", "launch_date": "2023-01-20", "eol_date": None},
+        {"platform_name": "VaultZ ME5", "business_unit": "Storage", "launch_date": "2019-08-01", "eol_date": "2024-03-31"},
+        {"platform_name": "ServerY R650", "business_unit": "Servers", "launch_date": "2020-11-05", "eol_date": "2024-11-30"},
+        {"platform_name": "ScaleF 900", "business_unit": "Storage", "launch_date": "2022-06-01", "eol_date": None},
+        {"platform_name": "ServerY XE9", "business_unit": "Servers", "launch_date": "2023-09-01", "eol_date": None},
     ]
     df = pd.DataFrame(platforms)
     df.insert(0, "platform_id", range(1, len(df) + 1))
@@ -44,14 +44,16 @@ def generate_suppliers():
 
     suppliers = []
     for i in range(NUM_SUPPLIERS):
-        suppliers.append({
-            "supplier_id": i + 1,
-            "supplier_name": fake.company(),
-            "country": random.choice(countries),
-            "consignment_partner": random.random() < 0.35,
-            "lead_time_days": random.randint(30, 120),
-            "supplier_tier": random.choice(tiers),
-        })
+        suppliers.append(
+            {
+                "supplier_id": i + 1,
+                "supplier_name": fake.company(),
+                "country": random.choice(countries),
+                "consignment_partner": random.random() < 0.35,
+                "lead_time_days": random.randint(30, 120),
+                "supplier_tier": random.choice(tiers),
+            }
+        )
 
     df = pd.DataFrame(suppliers)
     print(f"✅ Generated {len(df)} suppliers")
@@ -62,7 +64,20 @@ def generate_parts(platforms_df):
     """
     IMPORTANT: Guarantees unique part_number values so Postgres UNIQUE constraint won't fail.
     """
-    commodities = ["DRAM", "SSD", "HDD", "Controller", "Power Supply", "Fan", "Enclosure", "NIC", "CPU", "RAID", "Cable", "Heatsink"]
+    commodities = [
+        "DRAM",
+        "SSD",
+        "HDD",
+        "Controller",
+        "Power Supply",
+        "Fan",
+        "Enclosure",
+        "NIC",
+        "CPU",
+        "RAID",
+        "Cable",
+        "Heatsink",
+    ]
     lifecycle_states = ["Active", "EOL", "EOSS", "Discontinued"]
     prefixes = ["0X", "AB", "CD", "EF", "1K", "2M", "3N", "4P"]
 
@@ -97,17 +112,19 @@ def generate_parts(platforms_df):
         else:
             unit_cost = round(random.uniform(5, 120), 2)
 
-        parts.append({
-            "part_id": i + 1,
-            "part_number": make_unique_part_number(),
-            "description": f"{commodity} - {fake.company()}",
-            "commodity": commodity,
-            "unit_cost": unit_cost,
-            "lifecycle_state": lifecycle,
-            "eol_date": eol_date,
-            "eoss_date": eoss_date,
-            "platform_primary": random.choice(platform_names),
-        })
+        parts.append(
+            {
+                "part_id": i + 1,
+                "part_number": make_unique_part_number(),
+                "description": f"{commodity} - {fake.company()}",
+                "commodity": commodity,
+                "unit_cost": unit_cost,
+                "lifecycle_state": lifecycle,
+                "eol_date": eol_date,
+                "eoss_date": eoss_date,
+                "platform_primary": random.choice(platform_names),
+            }
+        )
 
     df = pd.DataFrame(parts)
     print(f"✅ Generated {len(df)} parts (unique part_number enforced)")
@@ -123,15 +140,17 @@ def generate_bom(parts_df, platforms_df):
         n = random.randint(25, 60)
         selected = parts_df.sample(n=n, random_state=random.randint(1, 99999))
         for _, part in selected.iterrows():
-            records.append({
-                "bom_id": bom_id,
-                "platform_id": int(platform["platform_id"]),
-                "part_id": int(part["part_id"]),
-                "qty_per_unit": random.randint(1, 8),
-                "is_shared": random.random() < 0.20,
-                "effective_start": platform["launch_date"],
-                "effective_end": platform["eol_date"],
-            })
+            records.append(
+                {
+                    "bom_id": bom_id,
+                    "platform_id": int(platform["platform_id"]),
+                    "part_id": int(part["part_id"]),
+                    "qty_per_unit": random.randint(1, 8),
+                    "is_shared": random.random() < 0.20,
+                    "effective_start": platform["launch_date"],
+                    "effective_end": platform["eol_date"],
+                }
+            )
             bom_id += 1
 
     df = pd.DataFrame(records)
@@ -157,15 +176,17 @@ def generate_inventory(parts_df, suppliers_df):
                 on_hand = random.randint(50, 1200)
                 consigned = random.randint(0, 600)
 
-            records.append({
-                "inventory_id": inv_id,
-                "part_id": int(part["part_id"]),
-                "supplier_id": int(supplier["supplier_id"]),
-                "location": random.choice(locations),
-                "on_hand_qty": on_hand,
-                "consigned_qty": consigned,
-                "in_transit_qty": random.randint(0, 250),
-            })
+            records.append(
+                {
+                    "inventory_id": inv_id,
+                    "part_id": int(part["part_id"]),
+                    "supplier_id": int(supplier["supplier_id"]),
+                    "location": random.choice(locations),
+                    "on_hand_qty": on_hand,
+                    "consigned_qty": consigned,
+                    "in_transit_qty": random.randint(0, 250),
+                }
+            )
             inv_id += 1
 
     df = pd.DataFrame(records)
@@ -194,14 +215,16 @@ def generate_forecast(parts_df, platforms_df, weeks=12):
 
             forecasted = max(0, base + random.randint(-50, 50))
 
-            records.append({
-                "forecast_id": fc_id,
-                "platform_id": random.randint(1, len(platforms_df)),
-                "part_id": int(part["part_id"]),
-                "forecast_week": week,
-                "forecasted_units": forecasted,
-                "forecast_type": ftype,
-            })
+            records.append(
+                {
+                    "forecast_id": fc_id,
+                    "platform_id": random.randint(1, len(platforms_df)),
+                    "part_id": int(part["part_id"]),
+                    "forecast_week": week,
+                    "forecasted_units": forecasted,
+                    "forecast_type": ftype,
+                }
+            )
             fc_id += 1
 
     df = pd.DataFrame(records)
@@ -218,17 +241,19 @@ def generate_ltb_orders(parts_df, platforms_df, suppliers_df):
     for _, part in eol_parts.iterrows():
         if random.random() < 0.60:
             order_date = fake.date_between(start_date="-12m", end_date="today")
-            records.append({
-                "ltb_id": ltb_id,
-                "platform_id": random.randint(1, len(platforms_df)),
-                "part_id": int(part["part_id"]),
-                "supplier_id": random.randint(1, len(suppliers_df)),
-                "order_date": order_date,
-                "qty_ordered": random.randint(1000, 12000),
-                "expected_delivery_date": fake.date_between(start_date="today", end_date="+4m"),
-                "order_reason": random.choice(["EOL Final Buy", "Service Buffer", "Safety Stock"]),
-                "gsm_approver": fake.name(),
-            })
+            records.append(
+                {
+                    "ltb_id": ltb_id,
+                    "platform_id": random.randint(1, len(platforms_df)),
+                    "part_id": int(part["part_id"]),
+                    "supplier_id": random.randint(1, len(suppliers_df)),
+                    "order_date": order_date,
+                    "qty_ordered": random.randint(1000, 12000),
+                    "expected_delivery_date": fake.date_between(start_date="today", end_date="+4m"),
+                    "order_reason": random.choice(["EOL Final Buy", "Service Buffer", "Safety Stock"]),
+                    "gsm_approver": fake.name(),
+                }
+            )
             ltb_id += 1
 
     df = pd.DataFrame(records)
@@ -251,18 +276,20 @@ def generate_excess(parts_df, inventory_df, forecast_df):
         if excess > 100:
             scrap = int(excess * 0.70)
             hold = excess - scrap
-            records.append({
-                "calc_id": calc_id,
-                "part_id": part_id,
-                "supplier_id": int(inv["supplier_id"]),
-                "calc_date": datetime.now().date(),
-                "on_hand": on_hand,
-                "total_forecast_remaining": total_fc,
-                "calculated_excess": excess,
-                "scrap_recommended": scrap,
-                "hold_recommended": hold,
-                "consignment_eligible": excess > 500,
-            })
+            records.append(
+                {
+                    "calc_id": calc_id,
+                    "part_id": part_id,
+                    "supplier_id": int(inv["supplier_id"]),
+                    "calc_date": datetime.now().date(),
+                    "on_hand": on_hand,
+                    "total_forecast_remaining": total_fc,
+                    "calculated_excess": excess,
+                    "scrap_recommended": scrap,
+                    "hold_recommended": hold,
+                    "consignment_eligible": excess > 500,
+                }
+            )
             calc_id += 1
 
     df = pd.DataFrame(records)
@@ -272,10 +299,19 @@ def generate_excess(parts_df, inventory_df, forecast_df):
 
 def generate_scrap_approvals(parts_df, excess_df):
     if len(excess_df) == 0:
-        df = pd.DataFrame(columns=[
-            "approval_id", "part_id", "scrap_qty", "scrap_value", "gsm_approver",
-            "approval_level", "approval_date", "status", "regrello_workflow_id"
-        ])
+        df = pd.DataFrame(
+            columns=[
+                "approval_id",
+                "part_id",
+                "scrap_qty",
+                "scrap_value",
+                "gsm_approver",
+                "approval_level",
+                "approval_date",
+                "status",
+                "regrello_workflow_id",
+            ]
+        )
         print("✅ Generated 0 scrap approvals (no excess)")
         return df
 
@@ -289,17 +325,19 @@ def generate_scrap_approvals(parts_df, excess_df):
         scrap_qty = int(row["scrap_recommended"])
         scrap_value = round(scrap_qty * float(part_cost.get(pid, 10.0)), 2)
 
-        records.append({
-            "approval_id": appr_id,
-            "part_id": pid,
-            "scrap_qty": scrap_qty,
-            "scrap_value": scrap_value,
-            "gsm_approver": fake.name(),
-            "approval_level": random.randint(1, 3),
-            "approval_date": fake.date_between(start_date="-90d", end_date="today"),
-            "status": random.choice(["Approved", "Pending", "Rejected"]),
-            "regrello_workflow_id": f"WF-{random.randint(10000, 99999)}",
-        })
+        records.append(
+            {
+                "approval_id": appr_id,
+                "part_id": pid,
+                "scrap_qty": scrap_qty,
+                "scrap_value": scrap_value,
+                "gsm_approver": fake.name(),
+                "approval_level": random.randint(1, 3),
+                "approval_date": fake.date_between(start_date="-90d", end_date="today"),
+                "status": random.choice(["Approved", "Pending", "Rejected"]),
+                "regrello_workflow_id": f"WF-{random.randint(10000, 99999)}",
+            }
+        )
         appr_id += 1
 
     df = pd.DataFrame(records)

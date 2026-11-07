@@ -100,3 +100,27 @@ CREATE INDEX IF NOT EXISTS idx_part_lifecycle ON dim_part(lifecycle_state);
 CREATE INDEX IF NOT EXISTS idx_part_eol ON dim_part(eol_date);
 CREATE INDEX IF NOT EXISTS idx_inventory_part ON fact_inventory(part_id);
 CREATE INDEX IF NOT EXISTS idx_excess_part ON fact_excess_calculation(part_id);
+CREATE INDEX IF NOT EXISTS idx_excess_supplier ON fact_excess_calculation(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_forecast_part_week ON fact_forecast(part_id, forecast_week);
+CREATE INDEX IF NOT EXISTS idx_bom_platform ON fact_bom(platform_id);
+CREATE INDEX IF NOT EXISTS idx_ltb_part ON fact_ltb_orders(part_id);
+CREATE INDEX IF NOT EXISTS idx_scrap_status ON fact_scrap_approval(status);
+
+-- ==================================================
+-- Least-privilege role for executing LLM-generated SQL
+-- (defence in depth: even if every app-level guardrail failed,
+--  this role physically cannot write, and queries are time-boxed)
+-- ==================================================
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'copilot_readonly') THEN
+    CREATE ROLE copilot_readonly LOGIN PASSWORD 'readonly_password';
+  END IF;
+END
+$$;
+GRANT CONNECT ON DATABASE eando_copilot TO copilot_readonly;
+GRANT USAGE ON SCHEMA public TO copilot_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO copilot_readonly;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO copilot_readonly;
+ALTER ROLE copilot_readonly SET default_transaction_read_only = on;
+ALTER ROLE copilot_readonly SET statement_timeout = '10s';
