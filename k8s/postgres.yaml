@@ -1,0 +1,79 @@
+# PostgreSQL warehouse: PersistentVolumeClaim + Deployment + Service.
+#
+# Why a PVC: a pod's own filesystem is thrown away whenever the pod restarts, is
+# rescheduled to another node, or the image is upgraded. The warehouse data must survive
+# all of that, so it lives on a PersistentVolume that Kubernetes re-attaches to the new pod.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: eando-copilot
+spec:
+  accessModes:
+    - ReadWriteOnce        # one node mounts it read-write at a time; that's all a single DB needs
+  resources:
+    requests:
+      storage: 5Gi         # ~8.4K synthetic rows need far less; headroom for real data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: eando-copilot
+  labels:
+    app: postgres
+spec:
+  replicas: 1              # one writer; Postgres replication is a job for an operator or a managed DB
+  # Recreate, not RollingUpdate: a ReadWriteOnce volume can't be attached to the old and
+  # new pod at the same time, and two Postgres processes must never share one data dir.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          ports:
+            - containerPort: 5432
+          # POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD come from the secret.
+          # (This also injects the app keys; in production give Postgres its own Secret.)
+          envFrom:
+            - secretRef:
+                name: eando-secrets
+          env:
+            # Use a subfolder: some volume types put a lost+found dir at the mount root,
+            # and initdb refuses to initialise a non-empty directory.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+---
+# ClusterIP = reachable only inside the cluster. The database is never exposed publicly;
+# API pods reach it at postgres:5432 (the Service name is the DNS name).
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: eando-copilot
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
