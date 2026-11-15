@@ -1,0 +1,54 @@
+# Streamlit UI: Deployment + Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eando-ui
+  namespace: eando-copilot
+  labels:
+    app: eando-ui
+spec:
+  # 1 replica on purpose: Streamlit keeps each user's session state (chat history,
+  # settings) in the memory of the process that served them. With 2 replicas, a browser
+  # reconnect could land on the other pod and the conversation would vanish.
+  # Scaling it needs sticky sessions or external session storage; the API is where load is.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eando-ui
+  template:
+    metadata:
+      labels:
+        app: eando-ui
+    spec:
+      containers:
+        - name: ui
+          image: eando-ui:latest      # placeholder: same Dockerfile, different command
+          imagePullPolicy: IfNotPresent
+          command: ["streamlit", "run", "ui/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+          ports:
+            - containerPort: 8501
+          # Only the configmap: the UI holds no secrets. It just needs EANDO_API_URL.
+          envFrom:
+            - configMapRef:
+                name: eando-config
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health   # Streamlit's built-in health endpoint
+              port: 8501
+            periodSeconds: 10
+---
+# NodePort exposes the UI on port 30501 of every node, e.g. http://<minikube ip>:30501.
+# Fine for a demo; in production this would be a ClusterIP behind an Ingress with TLS + SSO.
+apiVersion: v1
+kind: Service
+metadata:
+  name: eando-ui
+  namespace: eando-copilot
+spec:
+  type: NodePort
+  selector:
+    app: eando-ui
+  ports:
+    - port: 8501
+      targetPort: 8501
+      nodePort: 30501

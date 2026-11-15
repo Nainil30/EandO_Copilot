@@ -1,0 +1,108 @@
+# FastAPI service: Deployment + Service + HorizontalPodAutoscaler.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eando-api
+  namespace: eando-copilot
+  labels:
+    app: eando-api
+spec:
+  # 2 replicas = high availability: if one pod crashes, or its node is drained for
+  # maintenance, the other keeps serving. Rolling updates also replace pods one at a time,
+  # so a deploy causes no downtime.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: eando-api
+  template:
+    metadata:
+      labels:
+        app: eando-api
+    spec:
+      containers:
+        - name: api
+          image: eando-api:latest     # placeholder: built from the repo Dockerfile (default CMD = uvicorn)
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: eando-config
+            - secretRef:
+                name: eando-secrets
+          # Liveness vs readiness answer two different questions:
+          #   liveness  "is the process stuck?"          -> fail = Kubernetes RESTARTS the container
+          #   readiness "can it take traffic right now?" -> fail = pod is REMOVED from the Service,
+          #                                                 but not restarted
+          # /health only checks the process (cheap). /ready also touches Postgres and the
+          # vector store. If liveness checked the DB, a database outage would make Kubernetes
+          # restart every healthy API pod in a loop, which fixes nothing.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          # requests = what the scheduler reserves (and what HPA % is measured against).
+          # limits   = hard ceiling: CPU is throttled, memory over the limit gets the pod OOM-killed.
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 250m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          volumeMounts:
+            - name: chroma
+              mountPath: /app/.chroma
+      volumes:
+        # Each pod keeps its own copy of the knowledge base (54 chunks, small).
+        # emptyDir is wiped when the pod is deleted; see k8s/README.md for rebuilding it.
+        - name: chroma
+          emptyDir: {}
+---
+# ClusterIP: the UI calls the API inside the cluster at http://eando-api:8000.
+# The Service load-balances across all ready API pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: eando-api
+  namespace: eando-copilot
+spec:
+  type: ClusterIP
+  selector:
+    app: eando-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+# Why an HPA: LLM-app traffic is bursty (a team runs a batch of questions before a review
+# meeting, then nothing for hours). The HPA adds pods when average CPU passes 70% of the
+# request (250m) and removes them when load drops, so we pay for 2 pods most of the day.
+# Needs metrics-server in the cluster (`minikube addons enable metrics-server`).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: eando-api
+  namespace: eando-copilot
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: eando-api
+  minReplicas: 2     # never drop below the HA floor
+  maxReplicas: 6     # cap cost and protect Postgres + the LLM rate limit
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

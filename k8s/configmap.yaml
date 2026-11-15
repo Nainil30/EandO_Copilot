@@ -1,0 +1,20 @@
+# Non-secret settings. Each key becomes an environment variable in the pod and maps to a
+# field in app/config.py (pydantic-settings reads env vars, so no code change is needed).
+# Changing a value: edit, `kubectl apply -f k8s/configmap.yaml`, then
+# `kubectl rollout restart deployment/eando-api -n eando-copilot` (env vars are read at start).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eando-config
+  namespace: eando-copilot
+data:
+  LLM_PROVIDER: "gemini"           # "fake" runs the whole stack with no API key
+  KB_VERSION: "v2"                 # written to every audit record; bump to invalidate the semantic cache
+  PROMPT_VERSION: "sql-v4"
+  DATADOG_ENABLED: "false"         # true -> DatadogEmitter, false -> NoopEmitter
+  DATADOG_STATSD_HOST: "localhost" # with the Datadog Agent DaemonSet this is the node IP
+  SQL_MAX_ROWS: "1000"             # hard cap on rows returned by generated SQL
+  LOG_LEVEL: "INFO"
+  # Not in app/config.py: read by the Streamlit UI (ui/api_client.py) to find the API.
+  # "eando-api" is the Service name in api.yaml; cluster DNS resolves it.
+  EANDO_API_URL: "http://eando-api:8000"

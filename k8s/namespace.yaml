@@ -1,0 +1,9 @@
+# Every E&O Copilot object lives in this namespace.
+# One `kubectl delete namespace eando-copilot` removes the whole app, and names like
+# "postgres" cannot collide with another team's objects on a shared cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eando-copilot
+  labels:
+    app.kubernetes.io/part-of: eando-copilot
